@@ -1,4 +1,12 @@
-NeuraFS — Virtual Neural Media File SystemNeuraFS is a Virtual Neural Media File System that represents audio signals using Implicit Signal Representation (SIREN / INR networks) stored inside custom .hcs (Hierarchical Neural Container) binary files. It allows zero-disk-write RAM streaming, instant metadata inspection, native OS virtual mounting, and local SMB network sharing.Key FeaturesImplicit Neural Parameterization: Audio signals are decomposed into 2.5-second subband chunks and fitted using PyTorch SIREN networks ($f(x) = \sin(\omega_0 \cdot (Wx + b))$).Custom .hcs Binary Container: 12-byte header, JSON manifest payload, and LZMA-compressed Float16/Float32 neural weights.Extensible Codec Architecture: Pluggable codec engine supporting SirenAgent and extensible via BaseNeuralCodec for future neural models (DAC, EnCodec).Zero-Disk-Write RAM Streaming: Decodes audio frames dynamically into memory buffers for real-time streaming without writing temporary .wav files to disk.Multi-Platform Access: Cross-platform support via Python SDK, Node.js SDK, CLI, REST API, Express Web Explorer, Linux FUSE, Windows WinFSP, and Samba VFS.Architecture Overview+-------------------------------------------------------+
+NeuraFS — Virtual Neural Media File SystemNeuraFS is a Virtual Neural Media File System that represents audio signals using Implicit Signal Representation (SIREN / INR networks) stored inside custom .hcs (Hierarchical Neural Container) binary files.
+It allows zero-disk-write RAM streaming, instant metadata inspection, native OS virtual mounting, and local SMB network sharing.
+Key FeaturesImplicit Neural Parameterization: Audio signals are decomposed into 2.5-second subband chunks and fitted using PyTorch SIREN networks ($f(x) = \sin(\omega_0 \cdot (Wx + b))$).
+Custom .hcs Binary Container: 12-byte header, JSON manifest payload, and LZMA-compressed Float16/Float32 neural weights.
+Extensible Codec Architecture: Pluggable codec engine supporting SirenAgent and extensible via BaseNeuralCodec for future neural models (DAC, EnCodec).
+Zero-Disk-Write RAM Streaming: Decodes audio frames dynamically into memory buffers for real-time streaming without writing temporary .wav files to disk.
+Multi-Platform Access: Cross-platform support via Python SDK, Node.js SDK, CLI, REST API, Express Web Explorer, Linux FUSE, Windows WinFSP, and Samba VFS.Architecture 
+Overview
++-------------------------------------------------------+
 | User Interfaces: Web Explorer UI | CLI Utility        |
 +-------------------------------------------------------+
 | Virtual Drivers: Linux FUSE | WinFSP | Samba VFS C    |
@@ -11,7 +19,7 @@ NeuraFS — Virtual Neural Media File SystemNeuraFS is a Virtual Neural Media Fi
 +-------------------------------------------------------+
 | Core Neural Engine: Codecs (SIREN, FutureCodec) & DSP |
 +-------------------------------------------------------+
-Quickstart1. InstallationClone the repository and install the Python package in editable mode:Bashgit clone https://github.com/your-org/NeuraFS.git
+Quickstart1. InstallationClone the repository and install the Python package in editable mode:Bashgit clone https://github.com/extreme4music-nexus/NeuraFS_v2.0.git
 cd NeuraFS
 pip install -e . --no-build-isolation
 2. CLI UsageBash# Encode WAV audio to .hcs container
@@ -51,4 +59,11 @@ Access the web dashboard at http://localhost:3000.Project StructurePlaintextNeur
     ├── drivers/              # Linux FUSE, WinFSP & Samba C modules
     ├── tests/                # Automated pytest unit testing suite
     └── benchmarks/           # Quality (SI-SDR, LSD) & resource metrics
-DocumentationDetailed technical documentation is available in the docs/ folder:docs/HCS_SPEC.md: .hcs binary header layout, manifest schema, and payload specs.docs/API.md: Complete FastAPI, SDK, and CLI reference guide.docs/ARCHITECTURE.md: System hierarchy, pipeline flow, and VFS design.docs/BENCHMARKS.md: SI-SDR, LSD metrics, memory footprint, and quality tuning plans.docs/ROADMAP.md: Historical milestone tracking and future engineering phases.
+	
+DocumentationDetailed technical documentation is available in the docs/ 
+folder:
+docs/HCS_SPEC.md: .hcs binary header layout, manifest schema, and payload specs.
+docs/API.md: Complete FastAPI, SDK, and CLI reference guide.
+docs/ARCHITECTURE.md: System hierarchy, pipeline flow, and VFS design.
+docs/BENCHMARKS.md: SI-SDR, LSD metrics, memory footprint, and quality tuning plans.
+docs/ROADMAP.md: Historical milestone tracking and future engineering phases.
