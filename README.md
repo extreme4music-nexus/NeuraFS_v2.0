@@ -6,20 +6,22 @@ Extensible Codec Architecture: Pluggable codec engine supporting SirenAgent and 
 Zero-Disk-Write RAM Streaming: Decodes audio frames dynamically into memory buffers for real-time streaming without writing temporary .wav files to disk.
 Multi-Platform Access: Cross-platform support via Python SDK, Node.js SDK, CLI, REST API, Express Web Explorer, Linux FUSE, Windows WinFSP, and Samba VFS.Architecture 
 # Overview
-	+-------------------------------------------------------+
-	| User Interfaces: Web Explorer UI | CLI Utility        |
-	+-------------------------------------------------------+
-	| Virtual Drivers: Linux FUSE | WinFSP | Samba VFS C    |
-	+-------------------------------------------------------+
-	| Application SDKs: Python SDK | Node.js Express SDK    |
-	+-------------------------------------------------------+
-	| Async REST API Gateway (FastAPI Service)              |
-	+-------------------------------------------------------+
-	| Virtual File System (VFS RAM Streamer & Inspector)    |
-	+-------------------------------------------------------+
-	| Core Neural Engine: Codecs (SIREN, FutureCodec) & DSP |
-	+-------------------------------------------------------+
-Quickstart1. InstallationClone the repository and install the Python package in editable mode:Bashgit clone https://github.com/extreme4music-nexus/NeuraFS_v2.0.git
++-------------------------------------------------------+
+| User Interfaces: Web Explorer UI | CLI Utility        |
++-------------------------------------------------------+
+| Virtual Drivers: Linux FUSE | WinFSP | Samba VFS C    |
++-------------------------------------------------------+
+| Application SDKs: Python SDK | Node.js Express SDK    |
++-------------------------------------------------------+
+| Async REST API Gateway (FastAPI Service)              |
++-------------------------------------------------------+
+| Virtual File System (VFS RAM Streamer & Inspector)    |
++-------------------------------------------------------+
+| Core Neural Engine: Codecs (SIREN, FutureCodec) & DSP |
++-------------------------------------------------------+
+
+# Quickstart1. 
+1. InstallationClone the repository and install the Python package in editable mode:Bashgit clone https://github.com/extreme4music-nexus/NeuraFS_v2.0.git
 cd NeuraFS
 pip install -e . --no-build-isolation
 2. CLI UsageBash# Encode WAV audio to .hcs container
