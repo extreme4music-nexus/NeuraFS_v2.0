@@ -1,0 +1,25 @@
+[build-system]
+requires = ["setuptools>=61.0", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "neurafs"
+version = "2.0.0"
+description = "Virtual Neural Media File System Core Engine"
+requires-python = ">=3.8"
+dependencies = [
+    "torch",
+    "numpy",
+    "scipy",
+    "fastapi",
+    "uvicorn",
+    "pydantic",
+    "psutil"
+]
+
+[project.scripts]
+neurafs = "neurafs.cli:main"
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["neurafs*"]
