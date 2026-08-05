@@ -5,7 +5,7 @@ Custom .hcs Binary Container: 12-byte header, JSON manifest payload, and LZMA-co
 Extensible Codec Architecture: Pluggable codec engine supporting SirenAgent and extensible via BaseNeuralCodec for future neural models (DAC, EnCodec).
 Zero-Disk-Write RAM Streaming: Decodes audio frames dynamically into memory buffers for real-time streaming without writing temporary .wav files to disk.
 Multi-Platform Access: Cross-platform support via Python SDK, Node.js SDK, CLI, REST API, Express Web Explorer, Linux FUSE, Windows WinFSP, and Samba VFS.Architecture 
-Overview
+# Overview
 	+-------------------------------------------------------+
 	| User Interfaces: Web Explorer UI | CLI Utility        |
 	+-------------------------------------------------------+
