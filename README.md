@@ -5,7 +5,7 @@ Custom .hcs Binary Container: 12-byte header, JSON manifest payload, and LZMA-co
 Extensible Codec Architecture: Pluggable codec engine supporting SirenAgent and extensible via BaseNeuralCodec for future neural models (DAC, EnCodec).
 Zero-Disk-Write RAM Streaming: Decodes audio frames dynamically into memory buffers for real-time streaming without writing temporary .wav files to disk.
 Multi-Platform Access: Cross-platform support via Python SDK, Node.js SDK, CLI, REST API, Express Web Explorer, Linux FUSE, Windows WinFSP, and Samba VFS.Architecture 
-Overview
+# Overview
 +-------------------------------------------------------+
 | User Interfaces: Web Explorer UI | CLI Utility        |
 +-------------------------------------------------------+
@@ -19,10 +19,19 @@ Overview
 +-------------------------------------------------------+
 | Core Neural Engine: Codecs (SIREN, FutureCodec) & DSP |
 +-------------------------------------------------------+
-Quickstart1. InstallationClone the repository and install the Python package in editable mode:Bashgit clone https://github.com/extreme4music-nexus/NeuraFS_v2.0.git
+# Quickstart
+
+1. Installation
+Clone the repository and install the Python package in editable mode:
+
+Bash
+git clone https://github.com/extreme4music-nexus/NeuraFS_v2.0.git
 cd NeuraFS
 pip install -e . --no-build-isolation
-2. CLI UsageBash# Encode WAV audio to .hcs container
+
+2. CLI Usage
+Bash
+# Encode WAV audio to .hcs container
 neurafs encode input.wav output.hcs --precision fp16
 
 # Decode .hcs container back to WAV
@@ -30,14 +39,16 @@ neurafs decode output.hcs reconstructed.wav
 
 # Inspect container manifest metadata
 neurafs inspect output.hcs
-3. Native Python SDKPythonfrom neurafs.sdk import NeuraFSSDK
+
+3. Native Python SDK
+Python
+from neurafs.sdk import NeuraFSSDK
 
 # Inspect metadata
-manifest = NeuraFSSDK.inspect("output.hcs")
+manifest = NeuraFSSDK.inspect('output.hcs')
 
 # Encode media file
-NeuraFSSDK.encode_file("input.wav", "output.hcs", precision="fp16")
-
+NeuraFSSDK.encode_file('input.wav', 'output.hcs', precision='fp16')
 # Decode container to WAV
 NeuraFSSDK.decode_to_wav("output.hcs", "decoded.wav")
 4. Express Web Explorer InterfaceBashcd web
