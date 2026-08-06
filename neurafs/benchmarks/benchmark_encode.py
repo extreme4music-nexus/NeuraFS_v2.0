@@ -9,8 +9,8 @@ from neurafs.core.engine import NeuraFSEngine
 from neurafs.core.container import HCSContainer
 
 
-def run_benchmark():
-    print("--- Running NeuraFS Phase 8 Engine Benchmark ---")
+def run_encode_benchmark():
+    print("--- Running NeuraFS Engine Benchmark ---")
 
     # 1. Generate multi-frequency stereo audio signal for testing
     sr = 44100

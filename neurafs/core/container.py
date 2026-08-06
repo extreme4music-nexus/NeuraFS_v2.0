@@ -3,7 +3,8 @@
 import json
 import lzma
 import struct
-from typing import Dict, List, Tuple, Any
+import numpy as np
+from typing import Dict, List, Tuple, Any, Union
 
 from neurafs.core.config import config, PrecisionMode
 from neurafs.core.exceptions import (
@@ -11,6 +12,19 @@ from neurafs.core.exceptions import (
     UnsupportedHCSVersionError,
     CorruptedManifestError,
 )
+
+
+class NumpyJSONEncoder(json.JSONEncoder):
+    """Custom JSON Encoder handling NumPy numeric types and arrays."""
+
+    def default(self, obj: Any) -> Any:
+        if isinstance(obj, (np.integer, np.int32, np.int64)):
+            return int(obj)
+        if isinstance(obj, (np.floating, np.float32, np.float64)):
+            return float(obj)
+        if isinstance(obj, np.ndarray):
+            return obj.tolist()
+        return super().default(obj)
 
 
 class HCSContainer:
@@ -23,16 +37,19 @@ class HCSContainer:
     def pack(
         cls,
         manifest: Dict[str, Any],
-        raw_blobs: List[bytes],
+        raw_blobs: Union[List[bytes], bytes, bytearray],
         precision: PrecisionMode = PrecisionMode.STANDARD_16,
     ) -> bytes:
         """Packs metadata manifest and raw weight blobs into a standardized HCS binary container."""
         # Ensure manifest compliance
         manifest["hcs_version"] = "1.0"
-        manifest["neural"]["precision"] = precision.value
+        if "neural" in manifest:
+            manifest["neural"]["precision"] = precision.value
 
         try:
-            meta_json_bytes = json.dumps(manifest, ensure_ascii=False).encode("utf-8")
+            meta_json_bytes = json.dumps(
+                manifest, cls=NumpyJSONEncoder, ensure_ascii=False
+            ).encode("utf-8")
         except Exception as err:
             raise CorruptedManifestError(f"Failed to serialize manifest to JSON: {err}") from err
 
@@ -48,8 +65,11 @@ class HCSContainer:
 
         # Concatenate sequential raw neural weight blobs
         payload_bytes = bytearray()
-        for blob in raw_blobs:
-            payload_bytes.extend(blob)
+        if isinstance(raw_blobs, (bytes, bytearray)):
+            payload_bytes.extend(raw_blobs)
+        else:
+            for blob in raw_blobs:
+                payload_bytes.extend(blob)
 
         # Assemble uncompressed binary container layout
         container_payload = header + meta_json_bytes + bytes(payload_bytes)

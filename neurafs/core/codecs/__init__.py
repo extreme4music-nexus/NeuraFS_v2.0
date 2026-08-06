@@ -3,8 +3,9 @@
 from neurafs.core.codecs.siren import (
     SirenAgent,
     SineLayer,
+    compute_composite_loss,
     serialize_agent_raw_bytes,
-    deserialize_agent_from_bytes,
+    deserialize_agent_raw_bytes,
 )
 from neurafs.core.codecs.future_codec import (
     BaseNeuralCodec,
@@ -16,8 +17,9 @@ from neurafs.core.codecs.future_codec import (
 __all__ = [
     "SirenAgent",
     "SineLayer",
+    "compute_composite_loss",
     "serialize_agent_raw_bytes",
-    "deserialize_agent_from_bytes",
+    "deserialize_agent_raw_bytes",
     "BaseNeuralCodec",
     "FutureNeuralCodec",
     "register_codec",

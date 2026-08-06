@@ -122,15 +122,43 @@ class SirenAgent(nn.Module):
         return agent
 
 
+def serialize_agent_raw_bytes(agent: SirenAgent, precision: PrecisionMode = PrecisionMode.STANDARD_16) -> bytes:
+    """Standalone module-level wrapper for serializing SirenAgent weights."""
+    return agent.serialize_weights(precision)
+
+
+def deserialize_agent_raw_bytes(
+    raw_bytes: bytes,
+    in_features: int = 1,
+    hidden_features: int = 64,
+    hidden_layers: int = 3,
+    out_features: int = 1,
+    precision: PrecisionMode = PrecisionMode.STANDARD_16,
+) -> SirenAgent:
+    """Standalone module-level wrapper for deserializing SirenAgent weights."""
+    return SirenAgent.deserialize_weights(
+        raw_bytes,
+        in_features=in_features,
+        hidden_features=hidden_features,
+        hidden_layers=hidden_layers,
+        out_features=out_features,
+        precision=precision,
+    )
+
+
 def compute_composite_loss(predictions: torch.Tensor, targets: torch.Tensor) -> torch.Tensor:
-    """Computes joint Temporal MSE + Spectral STFT Loss for high SI-SDR fidelity."""
+    """Computes joint Temporal MSE + Spectral STFT Loss with correct time alignment and Hann windowing."""
     mse_loss = nn.MSELoss()(predictions, targets)
 
-    # Short-Time Fourier Transform Spectral Loss
-    stft_pred = torch.stft(predictions.squeeze(), n_fft=256, hop_length=64, return_complex=True)
-    stft_target = torch.stft(targets.squeeze(), n_fft=256, hop_length=64, return_complex=True)
+    # Ensure shape is [channels, time_samples] for STFT along the temporal dimension
+    pred_stft_in = predictions.T if predictions.ndim == 2 else predictions.unsqueeze(0)
+    target_stft_in = targets.T if targets.ndim == 2 else targets.unsqueeze(0)
 
-    spectral_loss = nn.L1Loss()(torch.abs(stft_pred), torch.abs(stft_target))
+    # Create Hann window on the same compute device to suppress warning & prevent spectral leakage
+    window = torch.hann_window(256).to(predictions.device)
+    stft_pred = torch.stft(predictions.squeeze().transpose(-2, -1), n_fft=256, hop_length=64, window=window, return_complex=True)
+    stft_tgt = torch.stft(targets.squeeze().transpose(-2, -1), n_fft=256, hop_length=64, window=window, return_complex=True)
 
-    # Weighted combination
+    spectral_loss = nn.L1Loss()(torch.abs(stft_pred), torch.abs(stft_tgt))
+
     return mse_loss + 0.2 * spectral_loss

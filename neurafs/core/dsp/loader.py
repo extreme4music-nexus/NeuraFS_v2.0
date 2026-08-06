@@ -20,7 +20,9 @@ class AudioLoader:
         # Attempt direct WAV parse via SciPy first for speed
         try:
             byte_io = io.BytesIO(file_bytes)
-            sr, pcm = wavfile.read(byte_io)
+            with warnings.catch_warnings():
+                warnings.simplefilter("ignore", WavFileWarning)
+                sr, pcm = wavfile.read(byte_io)
             if pcm.dtype == np.int16:
                 pcm = (pcm / 32768.0).astype(np.float32)
             elif pcm.dtype == np.int32:

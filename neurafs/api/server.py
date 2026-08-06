@@ -15,6 +15,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import Response, HTMLResponse
 
 from neurafs.core.config import config, PrecisionMode
+from neurafs.core.storage import StorageManager
 from neurafs.core.container import HCSContainer
 from neurafs.core.engine import NeuraFSEngine
 from neurafs.core.exceptions import (
@@ -31,7 +32,7 @@ from neurafs.api.schemas import (
 )
 
 # Global Storage Directories
-STORAGE_ROOT = os.path.abspath(os.path.join(os.getcwd(), "storage"))
+STORAGE_ROOT = StorageManager.get_path()
 TEMP_ROOT = os.path.join(STORAGE_ROOT, ".temp")
 os.makedirs(os.path.join(STORAGE_ROOT, "documents"), exist_ok=True)
 os.makedirs(os.path.join(STORAGE_ROOT, "media"), exist_ok=True)
@@ -62,7 +63,6 @@ def process_task_execution(task_id: str) -> None:
 
     filename = task_info["filename"]
     precision_str = task_info["precision_mode"]
-    compute_device = task_info["compute_device"]
 
     precision = PrecisionMode.HIGH_32 if precision_str == "fp32" else PrecisionMode.STANDARD_16
 
@@ -71,12 +71,11 @@ def process_task_execution(task_id: str) -> None:
         tasks[task_id]["progress"] = 10
         tasks[task_id]["logs"].append(f"Processing signal parameterization for {filename}...")
 
-        # Encode via Core Engine
+        # Encode via Core Engine (matches NeuraFSEngine.encode_media signature)
         hcs_bytes = NeuraFSEngine.encode_media(
             file_bytes=file_bytes,
             filename=filename,
             precision=precision,
-            device_str=compute_device,
         )
 
         manifest, _ = HCSContainer.unpack(hcs_bytes)
@@ -185,7 +184,7 @@ async def resynthesize_neural_media(req: ResynthesisRequest):
     raw_blobs = []
 
     for idx, c in enumerate(req.chunks):
-        if not c.weights_b64:
+        if not getattr(c, "weights_b64", None):
             continue
         raw_w = base64.b64decode(c.weights_b64)
         unit = c.model_dump(exclude={"weights_b64"})
@@ -194,11 +193,19 @@ async def resynthesize_neural_media(req: ResynthesisRequest):
         chunk_manifests.append(unit)
         raw_blobs.append(raw_w)
 
-    channels = max(c.ch_idx for c in req.chunks) + 1 if req.chunks else 1
+    channels = max((getattr(c, "ch_idx", 0) for c in req.chunks), default=0) + 1 if req.chunks else 1
+    num_subbands = max((getattr(c, "subband_idx", 0) for c in req.chunks), default=0) + 1
+    num_chunks = max((getattr(c, "time_slice_idx", 0) for c in req.chunks), default=0) + 1
 
     try:
         pcm_float = NeuraFSEngine.resynthesize_audio_from_units(
-            chunk_manifests, raw_blobs, channels, config.DEFAULT_SAMPLE_RATE, precision
+            chunk_units=chunk_manifests,
+            blob_list=raw_blobs,
+            channels=channels,
+            sample_rate=config.DEFAULT_SAMPLE_RATE,
+            precision=precision,
+            num_subbands=num_subbands,
+            num_chunks=num_chunks,
         )
 
         audio_pcm16 = (np.clip(pcm_float, -1.0, 1.0) * 32767.0).astype(np.int16)
@@ -236,6 +243,8 @@ async def stream_neural_file(path: str = Query(..., description="Relative path t
             chunk_units = manifest.get("chunks", [])
             channels = manifest.get("original", {}).get("channels", 2)
             sample_rate = manifest.get("original", {}).get("sample_rate", config.DEFAULT_SAMPLE_RATE)
+            num_subbands = manifest.get("neural", {}).get("subbands", 1)
+            num_chunks = max((u.get("time_slice_idx", 0) for u in chunk_units), default=0) + 1
 
             blob_list = []
             for unit in chunk_units:
@@ -243,7 +252,13 @@ async def stream_neural_file(path: str = Query(..., description="Relative path t
                 blob_list.append(raw_blobs_data[off : off + length])
 
             pcm_float = NeuraFSEngine.resynthesize_audio_from_units(
-                chunk_units, blob_list, channels, sample_rate, precision
+                chunk_units=chunk_units,
+                blob_list=blob_list,
+                channels=channels,
+                sample_rate=sample_rate,
+                precision=precision,
+                num_subbands=num_subbands,
+                num_chunks=num_chunks,
             )
 
             audio_pcm16 = (np.clip(pcm_float, -1.0, 1.0) * 32767.0).astype(np.int16)

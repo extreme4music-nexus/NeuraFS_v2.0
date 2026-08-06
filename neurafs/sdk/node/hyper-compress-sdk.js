@@ -1,6 +1,7 @@
 /**
- * NeuraFS Node.js Software Development Kit (SDK)
- * Handles 12-byte HCS container unpacking, manifest inspection, and RAM resynthesis.
+ * NeuraFS Node.js Universal SDK
+ * Supports HCS1 LZMA Container Unpacking, Subband Audio Resynthesis,
+ * Multi-file Folder Bundles, and Safe Memory Buffer Management.
  */
 
 const fs = require('fs');
@@ -8,13 +9,13 @@ const path = require('path');
 const lzma = require('lzma-native');
 
 /**
- * Unpacks and parses raw .hcs binary buffer based on 12-byte header spec.
- * Header: Magic (4B) | Flags (4B) | Manifest Length UInt32BE (4B)
+ * Unpacks raw .hcs binary buffer based on 12-byte HCS1 header spec.
+ * Header format: Magic "HCS1" (4B) | Flags (4B) | Manifest Length UInt32BE (4B)
  */
 function unpackHcsBuffer(fileBuffer) {
     try {
         const decompressed = lzma.decompress(fileBuffer);
-        
+
         if (decompressed.length < 12) {
             throw new Error('Container smaller than mandatory 12-byte header.');
         }
@@ -23,14 +24,14 @@ function unpackHcsBuffer(fileBuffer) {
         if (magic === 'HCS1') {
             const flags = decompressed.subarray(4, 8);
             const metaLen = decompressed.readUInt32BE(8);
-            
+
             const manifestJson = decompressed.subarray(12, 12 + metaLen).toString('utf-8');
             const manifest = JSON.parse(manifestJson);
             const rawBlobs = decompressed.subarray(12 + metaLen);
 
             return { manifest, rawBlobs, flags };
         }
-        
+
         throw new Error(`Invalid magic identifier: ${magic}`);
     } catch (err) {
         throw new Error(`Failed to unpack HCS container: ${err.message}`);
@@ -39,16 +40,23 @@ function unpackHcsBuffer(fileBuffer) {
 
 class NeuraFSSDK {
     /**
-     * @param {string} apiBaseUrl - Base HTTP URL for NeuraFS FastAPI backend
+     * @param {string} apiBaseUrl - Base HTTP URL for NeuraFS FastAPI backend engine
      */
-    constructor(apiBaseUrl = 'http://localhost:8000') {
+    constructor(apiBaseUrl = 'http://127.0.0.1:8000') {
         this.apiBaseUrl = apiBaseUrl;
     }
 
     /**
+     * Detects category (media vs binary document) based on file extension.
+     */
+    detectFileType(filePath) {
+        const ext = path.extname(filePath).toLowerCase();
+        const mediaExtensions = ['.mp3', '.wav', '.flac', '.ogg', '.mp4', '.avi', '.mkv', '.mov'];
+        return mediaExtensions.includes(ext) ? 'media' : 'binary';
+    }
+
+    /**
      * Reads and parses metadata manifest from .hcs container without decompressing weight blobs.
-     * @param {string} hcsFilePath - Path to target .hcs file
-     * @returns {Object} Extensible metadata manifest
      */
     readManifest(hcsFilePath) {
         if (!fs.existsSync(hcsFilePath)) {
@@ -60,16 +68,120 @@ class NeuraFSSDK {
     }
 
     /**
-     * Decompresses container and requests PCM resynthesis from the API engine.
-     * @param {string} hcsFilePath - Path to target .hcs file
-     * @returns {Promise<{buffer: Buffer, originalName: string, fileType: string}>}
+     * Alias method for backward compatibility with Web Explorer API.
      */
-    async decompressToBuffer(hcsFilePath) {
-        if (!fs.existsSync(hcsFilePath)) {
+    readHcsHeader(hcsFilePath) {
+        return this.readManifest(hcsFilePath);
+    }
+
+    /**
+     * Encodes single file asynchronously via NeuraFS API Engine with status tracking.
+     */
+    async compressFile(inputPath, targetDir, overrideOriginalName = null, taskId = null, onProgress = null, precisionMode = 'fp16', computeDevice = 'cpu', parallelEnabled = true) {
+        if (!fs.existsSync(inputPath)) {
+            throw new Error(`Input file not found at path: ${inputPath}`);
+        }
+
+        const originalName = overrideOriginalName || path.basename(inputPath);
+        const activeTaskId = taskId || ('task_' + Date.now());
+        const rawBuffer = fs.readFileSync(inputPath);
+
+        const formData = new FormData();
+        const blob = new Blob([rawBuffer], { type: 'application/octet-stream' });
+        formData.append('file', blob, originalName);
+        formData.append('task_id', activeTaskId);
+        formData.append('precision_mode', precisionMode);
+        formData.append('compute_device', computeDevice);
+        formData.append('parallel_enabled', String(parallelEnabled));
+
+        const startRes = await fetch(`${this.apiBaseUrl}/api/v1/encode-neural-media-start`, {
+            method: 'POST',
+            body: formData
+        });
+
+        if (!startRes.ok) {
+            throw new Error(`API Error [Neural Start]: ${startRes.statusText}`);
+        }
+
+        let apiResult = null;
+        while (true) {
+            await new Promise(r => setTimeout(r, 500));
+            const statusRes = await fetch(`${this.apiBaseUrl}/api/v1/task-status/${activeTaskId}`);
+            const statusData = await statusRes.json();
+
+            if (onProgress) {
+                const latestLog = statusData.log || statusData.logsHistory?.slice(-1)[0] || 'Parameterizing...';
+                onProgress(statusData.progress || 10, latestLog, statusData.logsHistory || []);
+            }
+
+            if (statusData.status === 'completed') {
+                apiResult = statusData.result;
+                break;
+            } else if (statusData.status === 'failed' || statusData.status === 'cancelled') {
+                throw new Error(statusData.log || 'Neural encoding task stopped.');
+            }
+        }
+
+        return {
+            fileName: originalName,
+            status: 'completed',
+            manifest: apiResult
+        };
+    }
+
+    /**
+     * Encodes folder bundle with multiple sub-files sequentially.
+     */
+    async compressFolderBundle(fileItems, targetDir, folderName, taskId = null, onProgress = null, precisionMode = 'fp16', computeDevice = 'cpu', parallelEnabled = true) {
+        const activeTaskId = taskId || ('bundle_' + Date.now());
+        const totalFiles = fileItems.length;
+
+        for (let i = 0; i < totalFiles; i++) {
+            const item = fileItems[i];
+            if (!fs.existsSync(item.tempFilePath)) {
+                console.warn(`[SDK Bundle Warning] Skipping missing file: ${item.tempFilePath}`);
+                continue;
+            }
+
+            const subTaskId = `${activeTaskId}_file_${i}`;
+            const fileProgress = Math.round(((i + 1) / totalFiles) * 100);
+
+            await this.compressFile(
+                item.tempFilePath,
+                targetDir,
+                item.originalName,
+                subTaskId,
+                (pct, log) => {
+                    if (onProgress) {
+                        onProgress(fileProgress, `[Bundle ${i + 1}/${totalFiles}] ${log}`);
+                    }
+                },
+                precisionMode,
+                computeDevice,
+                parallelEnabled
+            );
+        }
+
+        return {
+            folderName,
+            status: 'completed'
+        };
+    }
+
+    /**
+     * Decompresses container and requests PCM resynthesis from NeuraFS FastAPI engine.
+     */
+    async decompressToBuffer(hcsFilePath, targetSubPath = null) {
+        let absPath = hcsFilePath;
+        if (!fs.existsSync(absPath) && fs.existsSync(absPath + '.hcs')) {
+            absPath += '.hcs';
+        }
+
+        if (!fs.existsSync(absPath)) {
             throw new Error(`Target HCS file not found: ${hcsFilePath}`);
         }
 
-        const fileBuffer = fs.readFileSync(hcsFilePath);
+        const fileBuffer = fs.readFileSync(absPath);
         const { manifest, rawBlobs } = unpackHcsBuffer(fileBuffer);
         const originalInfo = manifest.original || {};
         const fileType = originalInfo.type || 'neural_media';

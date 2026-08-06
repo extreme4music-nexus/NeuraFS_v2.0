@@ -13,7 +13,7 @@ from neurafs.vfs.ram_streamer import RAMStreamBuffer
 
 
 def run_decode_benchmark():
-    print("--- Running NeuraFS Phase 8 Decoding & RAM Streaming Benchmark ---")
+    print("--- Running NeuraFS Decoding & RAM Streaming Benchmark ---")
 
     # 1. Generate 5-second multi-frequency test WAV (2 temporal chunks)
     sr = 44100

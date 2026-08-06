@@ -32,4 +32,21 @@ def calculate_lsd(target: np.ndarray, estimate: np.ndarray, sample_rate: int = 4
             )
         )
     )
+
+def compute_mse(reference: np.ndarray, estimate: np.ndarray) -> float:
+    """Calculates Mean Squared Error (MSE) between reference and estimated audio signals."""
+    ref = reference.flatten()
+    est = estimate.flatten()
+    min_len = min(len(ref), len(est))
+    if min_len == 0:
+        return 0.0
+    return float(np.mean((ref[:min_len] - est[:min_len]) ** 2))
+
+
+def compute_metrics(reference: np.ndarray, estimate: np.ndarray, sample_rate: int = 44100) -> dict[str, float]:
+    """Unified wrapper computing complete fidelity metrics dictionary (SI-SDR, LSD, MSE)."""
+    si_sdr = compute_si_sdr(reference, estimate)
+    lsd = compute_lsd(reference, estimate, sample_rate)
+    mse = compute_mse(reference, estimate)
+    
     return float(lsd)
