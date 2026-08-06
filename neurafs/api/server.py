@@ -82,7 +82,13 @@ def process_task_execution(task_id: str) -> None:
         is_media = manifest.get("original", {}).get("type") == "neural_media"
         target_folder = "media" if is_media else "documents"
 
-        save_path = os.path.join(STORAGE_ROOT, target_folder, f"{filename}.hcs")
+        # Dynamically evaluate current storage root from StorageManager
+        current_storage_root = StorageManager.get_path()
+        save_path = os.path.join(current_storage_root, target_folder, f"{filename}.hcs")
+
+        # Guarantee parent directory existence before file write operation
+        os.makedirs(os.path.dirname(save_path), exist_ok=True)
+
         with open(save_path, "wb") as f:
             f.write(hcs_bytes)
 
