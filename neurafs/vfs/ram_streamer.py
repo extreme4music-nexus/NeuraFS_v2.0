@@ -1,102 +1,114 @@
-"""NeuraFS On-Demand Chunk Resynthesis & RAM Streaming Buffer Engine."""
+"""NeuraFS Zero-Latency Prioritized Chunk-0 RAM Streamer."""
 
-import threading
-from typing import Dict, Any, List, Optional
+import io
+import torch
 import numpy as np
+from typing import Generator, Dict, Any, List, Tuple
+from scipy.signal import resample_poly
 
-from neurafs.core.config import config, PrecisionMode
-from neurafs.core.engine import NeuraFSEngine
+from neurafs.core.config import config, DecodeMode, PrecisionMode, TargetQualityTier
+from neurafs.core.container import HCSContainer
+from neurafs.core.codecs.siren import SirenAgent
+from neurafs.core.dsp import SubbandFilterBank, TemporalChunker
 
 
 class RAMStreamBuffer:
-    """Manages chunk-level resynthesis in RAM for zero-latency audio streaming."""
+    """Manages prioritized chunk resynthesis and zero-latency RAM audio streaming."""
 
-    def __init__(self, manifest: Dict[str, Any], raw_blobs_data: bytes):
-        self.manifest = manifest
-        self.raw_blobs_data = raw_blobs_data
-        self.orig_info = manifest.get("original", {})
-        self.neural_info = manifest.get("neural", {})
+    def __init__(self, hcs_bytes: bytes, decode_mode: DecodeMode = DecodeMode.REALTIME_ADAPTIVE):
+        self.hcs_bytes = hcs_bytes
+        self.decode_mode = decode_mode
+        self.manifest, self.raw_blobs_data = HCSContainer.unpack(hcs_bytes)
+        self.orig_info = self.manifest.get("original", {})
+        self.neural_info = self.manifest.get("neural", {})
 
-        self.sample_rate = self.orig_info.get("sample_rate", 44100)
+        self.sample_rate = self.orig_info.get("sample_rate", config.DEFAULT_SAMPLE_RATE)
         self.channels = self.orig_info.get("channels", 2)
-        self.chunk_units = manifest.get("chunks", [])
+        self.precision_str = self.neural_info.get("precision", "fp16")
+        self.precision = PrecisionMode.HIGH_32 if self.precision_str == "fp32" else PrecisionMode.STANDARD_16
 
-        precision_str = self.neural_info.get("precision", "fp16")
-        self.precision = PrecisionMode.HIGH_32 if precision_str == "fp32" else PrecisionMode.STANDARD_16
+        self.chunk_units = self.manifest.get("chunks", [])
+        self.num_subbands = self.neural_info.get("subbands", config.DEFAULT_SUBBANDS)
 
-        # Group chunk units by time_slice_idx
-        self.slice_groups: Dict[int, List[Dict[str, Any]]] = {}
-        for unit in self.chunk_units:
-            ts = unit["time_slice_idx"]
-            self.slice_groups.setdefault(ts, []).append(unit)
-
-        self.total_slices = len(self.slice_groups)
-        self.resynthesized_slices: Dict[int, np.ndarray] = {}
-        self.lock = threading.Lock()
-
-        # Instantly resynthesize chunk 0 (first 2.5 seconds) on startup
-        self._resynthesize_slice(0)
-
-        # Launch background worker thread for remaining chunks
-        if self.total_slices > 1:
-            threading.Thread(target=self._background_resynthesis_loop, daemon=True).start()
-
-    def _resynthesize_slice(self, slice_idx: int) -> Optional[np.ndarray]:
-        """Resynthesizes a single temporal slice into RAM."""
-        with self.lock:
-            if slice_idx in self.resynthesized_slices:
-                return self.resynthesized_slices[slice_idx]
-
-        units = self.slice_groups.get(slice_idx, [])
-        if not units:
-            return None
-
-        blob_list = [self.raw_blobs_data[u["offset"] : u["offset"] + u["length"]] for u in units]
-
-        pcm_float = NeuraFSEngine.resynthesize_audio_from_units(
-            chunk_units=units,
-            raw_blobs=blob_list,
-            channels=self.channels,
-            sample_rate=self.sample_rate,
-            precision=self.precision,
+        # Resolve Dynamic Quality Degradation Tier based on hardware scanner
+        self.hw_profile = config.scan_hardware(self.precision)
+        self.target_sample_rate, self.quality_tier = config.resolve_decode_tier(
+            self.decode_mode, self.hw_profile, self.sample_rate
         )
 
-        with self.lock:
-            self.resynthesized_slices[slice_idx] = pcm_float
+        # Group manifest units by temporal chunk index
+        self.chunks_map: Dict[int, List[Dict[str, Any]]] = {}
+        for unit in self.chunk_units:
+            c_idx = unit["time_slice_idx"]
+            self.chunks_map.setdefault(c_idx, []).append(unit)
 
-        return pcm_float
+        self.total_chunks = len(self.chunks_map)
 
-    def _background_resynthesis_loop(self) -> None:
-        """Background daemon sequentially resynthesizing remaining audio chunks."""
-        for slice_idx in range(1, self.total_slices):
-            self._resynthesize_slice(slice_idx)
+    def _resynchronize_single_chunk(self, chunk_idx: int) -> np.ndarray:
+        """Evaluates SIREN neural subband agents for a single 2.5s temporal chunk in RAM."""
+        units = self.chunks_map.get(chunk_idx, [])
+        if not units:
+            return np.zeros((self.channels, int(self.sample_rate * config.CHUNK_DURATION_SEC)), dtype=np.float32)
 
-    def read_pcm_bytes(self, offset_bytes: int, length_bytes: int) -> bytes:
-        """Reads reconstructed 16-bit PCM byte array directly from RAM buffers."""
-        bytes_per_sample = 2 * self.channels
-        start_sample = offset_bytes // bytes_per_sample
-        end_sample = (offset_bytes + length_bytes) // bytes_per_sample
+        device = torch.device("cpu")
+        samples_per_chunk = int(self.sample_rate * config.CHUNK_DURATION_SEC)
+        t_coords = torch.linspace(-1.0, 1.0, steps=samples_per_chunk, dtype=torch.float32).unsqueeze(-1).to(device)
 
-        slice_samples = int(self.sample_rate * config.CHUNK_DURATION_SEC)
-        start_slice = start_sample // slice_samples
-        end_slice = end_sample // slice_samples
+        subband_pcm_list = []
+        for unit in units:
+            offset = unit["offset"]
+            length = unit["length"]
+            raw_blob = self.raw_blobs_data[offset : offset + length]
 
-        out_chunks = []
-        for s_idx in range(start_slice, end_slice + 1):
-            pcm_slice = self._resynthesize_slice(s_idx)
-            if pcm_slice is not None:
-                out_chunks.append(pcm_slice)
+            agent = SirenAgent.deserialize_weights(
+                raw_blob,
+                in_features=1,
+                hidden_features=self.neural_info.get("hidden_features", config.SIREN_HIDDEN_FEATURES),
+                hidden_layers=self.neural_info.get("hidden_layers", config.SIREN_HIDDEN_LAYERS),
+                out_features=self.channels,
+                precision=self.precision,
+            ).to(device)
 
-        if not out_chunks:
-            return b""
+            agent.eval()
+            with torch.no_grad():
+                pred_pcm = agent(t_coords).cpu().numpy().T
+            subband_pcm_list.append(pred_pcm)
 
-        full_pcm_float = np.concatenate(out_chunks, axis=0)
-        
-        # Calculate local slice offset
-        local_start = start_sample - (start_slice * slice_samples)
-        local_end = local_start + (end_sample - start_sample)
-        
-        selected_pcm = full_pcm_float[local_start:local_end]
-        pcm_int16 = (np.clip(selected_pcm, -1.0, 1.0) * 32767.0).astype(np.int16)
+        # Synthesize subbands into full-spectrum chunk PCM
+        chunk_pcm = SubbandFilterBank.synthesize_subbands(subband_pcm_list)
 
-        return pcm_int16.tobytes()
+        # Apply Adaptive Resampling if hardware forces fallback tier (e.g. 44100Hz -> 22050Hz)
+        if self.target_sample_rate != self.sample_rate:
+            chunk_pcm = resample_poly(chunk_pcm, self.target_sample_rate, self.sample_rate, axis=-1).astype(np.float32)
+
+        return chunk_pcm
+
+    def get_priority_chunk_0_pcm(self) -> Tuple[np.ndarray, int]:
+        """Priority 1: Immediately resynthesizes Chunk 0 for 0ms playback start."""
+        chunk_0_pcm = self._resynchronize_single_chunk(chunk_idx=0)
+        return chunk_0_pcm, self.target_sample_rate
+
+    def generate_pcm_stream(self) -> Generator[bytes, None, None]:
+        """Yields continuous Int16 PCM byte buffers chunk-by-chunk directly from RAM."""
+        previous_chunk = None
+
+        for c_idx in range(self.total_chunks):
+            current_chunk = self._resynchronize_single_chunk(c_idx)
+
+            if previous_chunk is not None:
+                # Apply smooth Overlap-Add crossfade between adjacent chunks
+                stitched_pcm = TemporalChunker.reconstruct_from_chunks(
+                    [previous_chunk, current_chunk],
+                    sample_rate=self.target_sample_rate
+                )
+                # Extract second half of crossfaded buffer
+                half_len = stitched_pcm.shape[-1] // 2
+                pcm_out = stitched_pcm[..., :half_len]
+            else:
+                pcm_out = current_chunk
+
+            previous_chunk = current_chunk
+
+            # Convert Float32 [-1.0, 1.0] to Int16 PCM bytes for audio output
+            audio_int16 = (np.clip(pcm_out, -1.0, 1.0) * 32767.0).astype(np.int16)
+            yield audio_int16.T.tobytes()
