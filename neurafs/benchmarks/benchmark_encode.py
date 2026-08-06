@@ -1,54 +1,50 @@
-"""NeuraFS Encoding Performance Benchmark."""
+"""NeuraFS Phase 8 Encoding Fidelity & Performance Benchmark."""
 
 import time
-import os
-import psutil
-import tempfile
+import io
 import numpy as np
 import scipy.io.wavfile as wavfile
+from neurafs.core.config import PrecisionMode
+from neurafs.core.engine import NeuraFSEngine
+from neurafs.core.container import HCSContainer
 
-from neurafs.sdk import NeuraFSSDK
-from neurafs.benchmarks.metrics import calculate_si_sdr, calculate_lsd
 
+def run_benchmark():
+    print("--- Running NeuraFS Phase 8 Engine Benchmark ---")
 
-def run_encode_benchmark():
-    print("--- NeuraFS Encoding Benchmark ---")
+    # 1. Generate multi-frequency stereo audio signal for testing
     sr = 44100
-    duration = 3.0
+    duration = 2.5
     t = np.linspace(0, duration, int(sr * duration), endpoint=False)
-    audio = 0.6 * np.sin(2 * np.pi * 440 * t) + 0.3 * np.sin(2 * np.pi * 880 * t)
-    pcm_int16 = (audio * 32767.0).astype(np.int16)
+    ch1 = 0.5 * np.sin(2 * np.pi * 440 * t) + 0.25 * np.sin(2 * np.pi * 880 * t)
+    ch2 = 0.4 * np.sin(2 * np.pi * 330 * t) + 0.3 * np.sin(2 * np.pi * 660 * t)
+    pcm_stereo = np.vstack([ch1, ch2]).astype(np.float32)
 
-    with tempfile.NamedTemporaryFile(suffix=".wav", delete=False) as tmp:
-        wavfile.write(tmp.name, sr, pcm_int16)
-        in_wav = tmp.name
+    byte_io = io.BytesIO()
+    wavfile.write(byte_io, sr, (pcm_stereo.T * 32767).astype(np.int16))
+    raw_wav_bytes = byte_io.getvalue()
+    orig_size_kb = len(raw_wav_bytes) / 1024.0
 
-    out_hcs = in_wav + ".hcs"
+    # 2. Benchmark Encode Latency & Neural Synthesis
+    start_time = time.time()
+    hcs_bytes = NeuraFSEngine.encode_media(
+        raw_wav_bytes, filename="benchmark_test.wav", precision=PrecisionMode.STANDARD_16
+    )
+    encode_latency = time.time() - start_time
 
-    try:
-        proc = psutil.Process(os.getpid())
-        mem_before = proc.memory_info().rss / (1024 * 1024)
+    container_size_kb = len(hcs_bytes) / 1024.0
+    space_saved = (1.0 - (container_size_kb / orig_size_kb)) * 100.0
 
-        start_t = time.perf_counter()
-        res = NeuraFSSDK.encode_file(in_wav, out_hcs, precision="fp16")
-        enc_time = time.perf_counter() - start_t
+    manifest, _ = HCSContainer.unpack(hcs_bytes)
+    metrics = manifest.get("metrics", {})
 
-        mem_after = proc.memory_info().rss / (1024 * 1024)
-
-        orig_size = os.path.getsize(in_wav)
-        comp_size = os.path.getsize(out_hcs)
-        saving = (1 - (comp_size / orig_size)) * 100
-
-        print(f"Original Size:     {orig_size / 1024:.2f} KB")
-        print(f"Container Size:    {comp_size / 1024:.2f} KB ({saving:.1f}% space saved)")
-        print(f"Encode Latency:    {enc_time:.2f} seconds")
-        print(f"RAM Usage Delta:   {mem_after - mem_before:.2f} MB")
-        print(f"Metrics:           {res['manifest'].get('metrics', {})}")
-    finally:
-        for p in [in_wav, out_hcs]:
-            if os.path.exists(p):
-                os.remove(p)
+    print(f"Original Size:    {orig_size_kb:.2f} KB")
+    print(f"Container Size:   {container_size_kb:.2f} KB ({space_saved:.1f}% space saved)")
+    print(f"Encode Latency:   {encode_latency:.2f} seconds")
+    print(f"Subbands Used:    {manifest['neural'].get('subbands')}")
+    print(f"Dynamic Epochs:   {manifest['neural'].get('epochs')}")
+    print(f"Fidelity Metrics: {metrics}")
 
 
 if __name__ == "__main__":
-    run_encode_benchmark()
+    run_benchmark()
