@@ -1,6 +1,6 @@
 /**
  * NeuraFS Single-User Web Storage Explorer Backend (Express.js)
- * Safe Multer Disk Storage & Dynamic Universal Path Engine
+ * Memory Storage Architecture (Zero-Disk-Temp Pipeline)
  */
 
 const express = require('express');
@@ -9,7 +9,7 @@ const path = require('path');
 const os = require('os');
 const multer = require('multer');
 
-// 1. Динамичко читање на патеката од StorageManager (~/.neurafs/config.json)
+// 1. Читање на универзалната патека од ~/.neurafs/config.json
 function getUniversalStorageRoot() {
     const configPath = path.join(os.homedir(), '.neurafs', 'config.json');
     if (fs.existsSync(configPath)) {
@@ -19,21 +19,18 @@ function getUniversalStorageRoot() {
                 return path.resolve(configData.storage_path);
             }
         } catch (err) {
-            console.warn('[NeuraFS Web] Неуспешно читање на ~/.neurafs/config.json, се користи default патека.');
+            console.warn('[NeuraFS Web] Се користи стандардна патека за storage.');
         }
     }
     return path.resolve(path.join(__dirname, '..', '..', 'storage'));
 }
 
 const STORAGE_ROOT = getUniversalStorageRoot();
-const TEMP_ROOT = path.resolve(path.join(STORAGE_ROOT, '.temp'));
 const PUBLIC_DIR = path.resolve(path.join(__dirname, 'public'));
 
-// 2. Гарантирано синхроно креирање на Системските директориуми
 function ensureDirectoriesExist() {
     [
         STORAGE_ROOT,
-        TEMP_ROOT,
         path.join(STORAGE_ROOT, 'media'),
         path.join(STORAGE_ROOT, 'documents'),
         PUBLIC_DIR
@@ -59,19 +56,11 @@ app.use(express.json());
 app.use(express.urlencoded({ extended: true }));
 app.use(express.static(PUBLIC_DIR));
 
-// 3. Сигурна Multer DiskStorage Конфигурација со нормализирана патека
-const storageConfig = multer.diskStorage({
-    destination: (req, file, cb) => {
-        ensureDirectoriesExist();
-        cb(null, TEMP_ROOT);
-    },
-    filename: (req, file, cb) => {
-        const safeName = file.originalname.replace(/[^a-zA-Z0-9._-]/g, '_');
-        cb(null, `${Date.now()}-${safeName}`);
-    }
+// 2. Multer MemoryStorage (Без запишување на диск во .temp)
+const upload = multer({ 
+    storage: multer.memoryStorage(),
+    limits: { fileSize: 2 * 1024 * 1024 * 1024 } // 2GB лимит по фајл
 });
-
-const upload = multer({ storage: storageConfig });
 
 function calculateFolderSize(dirPath) {
     if (!fs.existsSync(dirPath)) return 0;
@@ -275,27 +264,23 @@ app.post('/api/fs/upload-async', upload.any(), async (req, res) => {
         if (isFolderBundle && files.length > 1 && typeof sdk.compressFolderBundle === 'function') {
             const folderName = relativePaths[0] ? relativePaths[0].split('/')[0] : 'Uploaded_Folder';
             const fileItems = files.map((f, i) => ({
-                tempFilePath: path.resolve(f.path),
+                buffer: f.buffer, // RAM buffer
                 originalName: f.originalname,
                 relativePath: relativePaths[i] || f.originalname
             }));
 
             const destDir = path.join(STORAGE_ROOT, userTargetFolder);
             await sdk.compressFolderBundle(fileItems, destDir, folderName, taskId, onProgress, precisionMode, computeDevice, parallelEnabled);
-            fileItems.forEach(f => { if (fs.existsSync(f.tempFilePath)) fs.unlinkSync(f.tempFilePath); });
 
         } else {
             const file = files[0];
-            const filePath = path.resolve(file.path);
             const isMedia = /\.(wav|mp3|flac|mp4|mkv|avi|ogg|mov)$/i.test(file.originalname);
             const autoFolder = isMedia ? 'media' : userTargetFolder;
             const destDir = path.join(STORAGE_ROOT, autoFolder);
             if (!fs.existsSync(destDir)) fs.mkdirSync(destDir, { recursive: true });
 
-            if (typeof sdk.compressFile === 'function') {
-                await sdk.compressFile(filePath, destDir, file.originalname, taskId, onProgress, precisionMode, computeDevice, parallelEnabled);
-            }
-            if (fs.existsSync(filePath)) fs.unlinkSync(filePath);
+            // Го препраќаме директно RAM баферот
+            await sdk.compressFile(file.buffer, destDir, file.originalname, taskId, onProgress, precisionMode, computeDevice, parallelEnabled);
         }
 
         if (activeTasks[taskId] && activeTasks[taskId].status !== 'cancelled') {
@@ -306,10 +291,6 @@ app.post('/api/fs/upload-async', upload.any(), async (req, res) => {
         }
 
     } catch (error) {
-        files.forEach(f => { 
-            const p = path.resolve(f.path);
-            if (fs.existsSync(p)) fs.unlinkSync(p); 
-        });
         if (activeTasks[taskId]) {
             if (activeTasks[taskId].status === 'cancelled') {
                 setTimeout(() => { delete activeTasks[taskId]; }, 1000);
@@ -396,7 +377,6 @@ app.use((req, res) => {
     res.sendFile(path.join(PUBLIC_DIR, 'index.html'));
 });
 
-// Експлицитно 127.0.0.1 слушање
 app.listen(PORT, '127.0.0.1', () => {
     console.log(`===================================================`);
     console.log(` NeuraFS Single-User Web Engine Active on Port ${PORT}`);

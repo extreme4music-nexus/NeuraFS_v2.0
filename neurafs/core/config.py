@@ -42,7 +42,10 @@ class HardwareProfile:
 
 class EngineConfig:
     """Dynamic configuration and policy orchestrator for NeuraFS."""
-
+    
+    MAGIC_HEADER: bytes = b"HCS1"
+    FORMAT_VERSION_FLAGS: bytes = b"\x00\x00\x00\x01"
+    LZMA_PRESET: int = 6
     DEFAULT_SAMPLE_RATE: int = 44100
     CHUNK_DURATION_SEC: float = 2.5
 
