@@ -1,323 +1,223 @@
-"""NeuraFS Master Engine Orchestrator, Worker Orchestration, & Validation Suite."""
+"""NeuraFS Parallel Encoding Engine & Multi-Agent Orchestrator."""
 
-import hashlib
-import math
+import os
+import time
 import multiprocessing as mp
-from typing import Dict, List, Tuple, Any, Optional
 import numpy as np
-import scipy.signal as signal
 import torch
-import torch.nn as nn
+from typing import Dict, Any, List, Tuple
 
-from neurafs.core.config import config, PrecisionMode
-from neurafs.core.container import HCSContainer
-from neurafs.core.dsp import DSPProcessor
-from neurafs.core.exceptions import NeuralResynthesisError, AudioAnalysisError
-from neurafs.core.codecs.siren import (
-    SirenAgent,
-    serialize_agent_raw_bytes,
-    deserialize_agent_from_bytes,
+from neurafs.core.config import config, PrecisionMode, DecodeMode
+from neurafs.core.dsp import (
+    AudioLoader,
+    SpectralComplexityAnalyzer,
+    SubbandFilterBank,
+    TemporalChunker,
 )
+from neurafs.core.codecs.siren import SirenAgent, compute_composite_loss
+from neurafs.core.container import HCSContainer
+from neurafs.benchmarks.metrics import compute_metrics
 
 
-def isolated_subband_worker(
-    time_slice_idx: int,
-    subband_idx: int,
-    ch_idx: int,
-    pcm_subband_data: np.ndarray,
-    sample_rate: int,
-    num_bands: int,
-    hidden_dim: int,
-    precision: str,
-    device_str: str,
-    return_dict: Dict[str, Any],
-) -> None:
-    """Isolated process worker for training a Siren agent on a specific subband chunk."""
-    try:
-        torch.set_num_threads(1)
-        device = torch.device("cuda" if (device_str == "cuda" and torch.cuda.is_available()) else "cpu")
+def _isolated_subband_worker(args: Dict[str, Any]) -> Dict[str, Any]:
+    """Isolated multi-core worker process executing SIREN training on a specific subband chunk."""
+    subband_pcm = args["pcm"]
+    precision_str = args["precision"]
+    epochs = args["epochs"]
+    channels = subband_pcm.ndim if subband_pcm.ndim == 1 else subband_pcm.shape[0]
 
-        num_samples = len(pcm_subband_data)
-        t_coords = torch.linspace(-1.0, 1.0, steps=num_samples, device=device).unsqueeze(1)
-        target_tensor = torch.from_numpy(pcm_subband_data).float().to(device).unsqueeze(1)
+    device = torch.device("cpu")  # Isolated CPU worker thread
+    num_samples = subband_pcm.shape[-1]
 
-        max_steps, target_loss = DSPProcessor.estimate_signal_complexity(
-            pcm_subband_data, subband_idx, num_bands
-        )
+    # Coordinate domain input [-1.0, 1.0]
+    t_coords = torch.linspace(-1.0, 1.0, steps=num_samples, dtype=torch.float32).unsqueeze(-1).to(device)
+    targets = torch.from_numpy(subband_pcm).T.float().to(device)
+    if targets.ndim == 1:
+        targets = targets.unsqueeze(-1)
 
-        agent = SirenAgent(
-            in_features=1,
-            hidden_features=hidden_dim,
-            hidden_layers=config.HIDDEN_LAYERS,
-            out_features=1,
-            omega_0=config.SIREN_OMEGA_0,
-        ).to(device)
+    agent = SirenAgent(
+        in_features=1,
+        hidden_features=config.SIREN_HIDDEN_FEATURES,
+        hidden_layers=config.SIREN_HIDDEN_LAYERS,
+        out_features=channels,
+        omega_0=config.SIREN_OMEGA_0,
+    ).to(device)
 
-        optimizer = torch.optim.Adam(agent.parameters(), lr=config.LEARNING_RATE)
-        criterion = nn.MSELoss()
+    optimizer = torch.optim.Adam(agent.parameters(), lr=1e-4)
 
-        best_loss = 0.999
-        patience = 0
-        for _ in range(max_steps):
-            optimizer.zero_grad()
-            pred = agent(t_coords)
-            loss = criterion(pred, target_tensor)
-            loss.backward()
-            optimizer.step()
+    # Train SIREN Agent for target dynamic epochs
+    agent.train()
+    for _ in range(epochs):
+        optimizer.zero_grad()
+        output = agent(t_coords)
+        loss = compute_composite_loss(output, targets)
+        loss.backward()
+        optimizer.step()
 
-            c_loss = loss.item()
-            if math.isnan(c_loss) or math.isinf(c_loss):
-                continue
+    precision = PrecisionMode.HIGH_32 if precision_str == "fp32" else PrecisionMode.STANDARD_16
+    serialized_blob = agent.serialize_weights(precision)
 
-            if c_loss < best_loss - 1e-5:
-                best_loss = c_loss
-                patience = 0
-            else:
-                patience += 1
-
-            if c_loss < target_loss or patience >= config.PATIENCE_LIMIT:
-                break
-
-        prec_mode = PrecisionMode.STANDARD_16 if precision == "fp16" else PrecisionMode.HIGH_32
-        raw_weight_bytes = serialize_agent_raw_bytes(agent, precision=prec_mode)
-
-        key = f"sub_{time_slice_idx}_{subband_idx}_{ch_idx}"
-        return_dict[key] = {
-            "time_slice_idx": time_slice_idx,
-            "subband_idx": subband_idx,
-            "ch_idx": ch_idx,
-            "num_samples": num_samples,
-            "hidden_dim": hidden_dim,
-            "loss": float(np.nan_to_num(best_loss)),
-            "raw_bytes": raw_weight_bytes,
-        }
-    except Exception as err:
-        print(f"[Subband Worker Error]: {err}")
+    return {
+        "chunk_idx": args["chunk_idx"],
+        "band_idx": args["band_idx"],
+        "blob": serialized_blob,
+        "channels": channels,
+    }
 
 
 class NeuraFSEngine:
-    """Master engine performing end-to-end encoding, decoding, and fidelity analysis."""
-
-    @staticmethod
-    def calculate_reconstruction_metrics(
-        original_audio_np: np.ndarray,
-        resynthesized_audio_np: np.ndarray,
-        sample_rate: int,
-    ) -> Dict[str, float]:
-        """Evaluates SI-SDR (Scale-Invariant Signal-to-Distortion Ratio), LSD, and MSE metrics."""
-        try:
-            min_len = min(len(original_audio_np), len(resynthesized_audio_np))
-            s_target = original_audio_np[:min_len, 0]
-            s_estimate = resynthesized_audio_np[:min_len, 0]
-
-            # Mean Squared Error (MSE)
-            mse = float(np.mean((s_target - s_estimate) ** 2))
-
-            # Scale-Invariant Signal-to-Distortion Ratio (SI-SDR)
-            alpha = np.dot(s_estimate, s_target) / (np.dot(s_target, s_target) + 1e-9)
-            e_target = alpha * s_target
-            e_noise = s_estimate - e_target
-            si_sdr = float(10 * np.log10(np.sum(e_target ** 2) / (np.sum(e_noise ** 2) + 1e-9)))
-
-            # Log-Spectral Distance (LSD)
-            _, _, stft_orig = signal.stft(s_target, fs=sample_rate, nperseg=512)
-            _, _, stft_resyn = signal.stft(s_estimate, fs=sample_rate, nperseg=512)
-            lsd = float(
-                np.mean(
-                    np.sqrt(
-                        np.mean(
-                            (np.log10(np.abs(stft_orig) + 1e-7) - np.log10(np.abs(stft_resyn) + 1e-7)) ** 2,
-                            axis=0,
-                        )
-                    )
-                )
-            )
-
-            return {
-                "si_sdr_db": round(si_sdr, 2),
-                "lsd": round(lsd, 3),
-                "mse": round(mse, 6),
-            }
-        except Exception:
-            return {"si_sdr_db": 0.0, "lsd": 0.0, "mse": 0.0}
+    """Core Orchestrator managing parallel neural media encoding and synthesis."""
 
     @classmethod
     def encode_media(
-        cls,
-        file_bytes: bytes,
-        filename: str,
-        precision: PrecisionMode = PrecisionMode.STANDARD_16,
-        num_subbands: Optional[int] = None,
-        device_str: str = "cpu",
+        cls, file_bytes: bytes, filename: str, precision: PrecisionMode = PrecisionMode.STANDARD_16
     ) -> bytes:
-        """Encodes media file into binary HCS container."""
-        original_size = len(file_bytes)
-        file_sha256 = hashlib.sha256(file_bytes).hexdigest()
+        """Encodes media file into .hcs neural container bytes using parallel worker pool."""
+        start_time = time.time()
+        hw_profile = config.scan_hardware(precision)
 
-        try:
-            audio_np, sample_rate, channels = DSPProcessor.extract_pcm_from_bytes(file_bytes, filename)
-        except AudioAnalysisError:
-            # Non-audio fallback: Store as lossless binary chunks
-            chunk_size = 256 * 1024
-            compressed_chunks = [
-                file_bytes[i : i + chunk_size] for i in range(0, original_size, chunk_size)
-            ]
-            manifest = {
-                "hcs_version": "1.0",
-                "original": {
-                    "name": filename,
-                    "size": original_size,
-                    "sha256": file_sha256,
-                    "type": "lossless_binary",
-                },
-                "neural": {"architecture": "N/A", "precision": precision.value},
-                "chunks": [],
-            }
-            return HCSContainer.pack(manifest, compressed_chunks, precision=precision)
+        # 1. Load Audio PCM
+        pcm_data, sample_rate, channels = AudioLoader.load_from_bytes(file_bytes)
 
-        # Signal Encoding Execution
-        if num_subbands is None:
-            num_subbands = config.DEFAULT_NUM_SUBBANDS
+        # 2. Analyze Audio Complexity
+        complexity_metrics = SpectralComplexityAnalyzer.analyze_complexity(pcm_data)
+        complexity_score = complexity_metrics["complexity_score"]
 
-        hidden_dim = config.HIDDEN_DIM_ARCHIVE if precision == PrecisionMode.HIGH_32 else config.HIDDEN_DIM_COMPACT
-        time_chunks = DSPProcessor.chunk_audio(audio_np, sample_rate)
+        # 3. Dynamic Hardware & Subband Allocation
+        num_subbands = config.calculate_dynamic_subbands(complexity_score, hw_profile.recommended_workers)
+        dynamic_epochs = config.calculate_dynamic_epochs(complexity_score)
 
-        all_work_units = []
-        for slice_idx, pcm_slice in time_chunks:
-            for ch in range(channels):
-                subband_signals = DSPProcessor.split_into_subbands(pcm_slice[:, ch], sample_rate, num_subbands)
-                for sb_idx, sb_pcm in enumerate(subband_signals):
-                    all_work_units.append((slice_idx, sb_idx, ch, sb_pcm))
+        # 4. Slice Audio into 2.5s Temporal Chunks
+        chunks = TemporalChunker.slice_into_chunks(pcm_data, sample_rate=sample_rate)
 
-        manager = mp.Manager()
-        return_dict = manager.dict()
-        max_workers = max(1, mp.cpu_count() - 1)
+        worker_tasks = []
+        chunk_manifest_units = []
+        blob_offset = 0
 
-        for i in range(0, len(all_work_units), max_workers):
-            batch = all_work_units[i : i + max_workers]
-            procs = [
-                mp.Process(
-                    target=isolated_subband_worker,
-                    args=(
-                        unit[0],
-                        unit[1],
-                        unit[2],
-                        unit[3],
-                        sample_rate,
-                        num_subbands,
-                        hidden_dim,
-                        precision.value,
-                        device_str,
-                        return_dict,
-                    ),
-                )
-                for unit in batch
-            ]
-            for p in procs:
-                p.start()
-            for p in procs:
-                p.join()
+        # 5. Decompose Each Temporal Chunk into Dynamic Subbands
+        for chunk in chunks:
+            c_idx = chunk["chunk_idx"]
+            subbands, cutoff_pairs = SubbandFilterBank.decompose_subbands(
+                chunk["pcm_data"], num_bands=num_subbands, sample_rate=sample_rate
+            )
 
-        results = [v for k, v in return_dict.items() if k.startswith("sub_")]
-        manager.shutdown()
+            for b_idx, (subband_pcm, cutoffs) in enumerate(zip(subbands, cutoff_pairs)):
+                worker_tasks.append({
+                    "chunk_idx": c_idx,
+                    "band_idx": b_idx,
+                    "pcm": subband_pcm,
+                    "precision": precision.value,
+                    "epochs": dynamic_epochs,
+                })
 
-        # Build Extensible Manifest & Raw Payload Buffers
-        raw_blobs = []
-        chunk_manifests = []
-        current_offset = 0
+        # 6. Execute Parallel Multi-Core SIREN Training Pool
+        num_workers = min(hw_profile.recommended_workers, len(worker_tasks))
+        with mp.Pool(processes=num_workers) as pool:
+            results = pool.map(_isolated_subband_worker, worker_tasks)
 
-        for unit in results:
-            raw_w_bytes = unit.pop("raw_bytes")
-            unit["offset"] = current_offset
-            unit["length"] = len(raw_w_bytes)
-            raw_blobs.append(raw_w_bytes)
-            current_offset += len(raw_w_bytes)
-            chunk_manifests.append(unit)
+        # 7. Assemble Binary Payload & Metadata Manifest
+        concatenated_blobs = bytearray()
+        for res in results:
+            blob_bytes = res["blob"]
+            blob_len = len(blob_bytes)
 
-        # Run Validation Metrics
-        resynthesized_audio = cls.resynthesize_audio_from_units(
-            chunk_manifests, raw_blobs, channels, sample_rate, precision
-        )
-        rec_metrics = cls.calculate_reconstruction_metrics(audio_np, resynthesized_audio, sample_rate)
+            chunk_manifest_units.append({
+                "time_slice_idx": res["chunk_idx"],
+                "subband_idx": res["band_idx"],
+                "offset": blob_offset,
+                "length": blob_len,
+            })
+
+            concatenated_blobs.extend(blob_bytes)
+            blob_offset += blob_len
 
         manifest = {
             "hcs_version": "1.0",
             "original": {
                 "name": filename,
-                "size": original_size,
-                "samples": len(audio_np),
-                "sha256": file_sha256,
-                "sample_rate": sample_rate,
-                "channels": channels,
+                "size": len(file_bytes),
                 "type": "neural_media",
+                "channels": channels,
+                "sample_rate": sample_rate,
             },
             "neural": {
                 "architecture": "SIREN",
+                "codec": "siren",
                 "precision": precision.value,
+                "hidden_layers": config.SIREN_HIDDEN_LAYERS,
+                "hidden_features": config.SIREN_HIDDEN_FEATURES,
+                "omega_0": config.SIREN_OMEGA_0,
                 "subbands": num_subbands,
-                "hidden_dim": hidden_dim,
-                "chunk_duration": config.CHUNK_DURATION_SEC,
+                "epochs": dynamic_epochs,
             },
-            "metrics": rec_metrics,
-            "chunks": chunk_manifests,
+            "metrics": complexity_metrics,
+            "chunks": chunk_manifest_units,
         }
 
-        return HCSContainer.pack(manifest, raw_blobs, precision=precision)
+        # 8. Pack into .hcs Binary Format
+        hcs_bytes = HCSContainer.pack(manifest, bytes(concatenated_blobs))
+
+        # 9. Compute Reconstruction Verification Metrics (SI-SDR / LSD)
+        try:
+            recon_pcm = cls.resynthesize_audio_from_units(
+                chunk_manifest_units,
+                [bytes(concatenated_blobs[u["offset"]:u["offset"] + u["length"]]) for u in chunk_manifest_units],
+                channels,
+                sample_rate,
+                precision,
+                num_subbands=num_subbands,
+                num_chunks=len(chunks),
+            )
+            metrics = compute_metrics(pcm_data, recon_pcm, sample_rate)
+            manifest["metrics"].update(metrics)
+            # Repack with computed fidelity metrics
+            hcs_bytes = HCSContainer.pack(manifest, bytes(concatenated_blobs))
+        except Exception:
+            pass
+
+        return hcs_bytes
 
     @classmethod
     def resynthesize_audio_from_units(
         cls,
         chunk_units: List[Dict[str, Any]],
-        raw_blobs: List[bytes],
+        blob_list: List[bytes],
         channels: int,
         sample_rate: int,
         precision: PrecisionMode,
+        num_subbands: int,
+        num_chunks: int,
     ) -> np.ndarray:
-        """Reconstructs float PCM audio matrix in memory from subband SIREN units."""
-        slices_dict: Dict[int, Dict[int, List[Dict[str, Any]]]] = {}
-        blob_map = {unit["offset"]: raw_blobs[i] for i, unit in enumerate(chunk_units)}
-
-        for unit in chunk_units:
-            ts, ch = unit["time_slice_idx"], unit["ch_idx"]
-            slices_dict.setdefault(ts, {}).setdefault(ch, []).append(unit)
-
-        resynthesized_channels = [[] for _ in range(channels)]
+        """Resynthesizes full PCM audio in RAM by evaluating SIREN subband agents in parallel."""
         device = torch.device("cpu")
+        samples_per_chunk = int(sample_rate * config.CHUNK_DURATION_SEC)
+        t_coords = torch.linspace(-1.0, 1.0, steps=samples_per_chunk, dtype=torch.float32).unsqueeze(-1).to(device)
 
-        for ts_idx in sorted(slices_dict.keys()):
-            for ch_idx in range(channels):
-                units_in_ch = slices_dict[ts_idx].get(ch_idx, [])
-                if not units_in_ch:
-                    continue
+        reconstructed_chunks = [[] for _ in range(num_chunks)]
 
-                num_samples = units_in_ch[0]["num_samples"]
-                t_coords = torch.linspace(-1.0, 1.0, steps=num_samples).unsqueeze(1).to(device)
-                slice_pcm_sum = np.zeros(num_samples, dtype=np.float32)
+        for unit, raw_blob in zip(chunk_units, blob_list):
+            c_idx = unit["time_slice_idx"]
+            agent = SirenAgent.deserialize_weights(
+                raw_blob,
+                in_features=1,
+                hidden_features=config.SIREN_HIDDEN_FEATURES,
+                hidden_layers=config.SIREN_HIDDEN_LAYERS,
+                out_features=channels,
+                precision=precision,
+            ).to(device)
 
-                for u in units_in_ch:
-                    agent = SirenAgent(
-                        in_features=1,
-                        hidden_features=u.get("hidden_dim", 32),
-                        hidden_layers=config.HIDDEN_LAYERS,
-                        out_features=1,
-                        omega_0=config.SIREN_OMEGA_0,
-                    ).to(device)
+            agent.eval()
+            with torch.no_grad():
+                pred_pcm = agent(t_coords).cpu().numpy().T
 
-                    raw_w_bytes = blob_map[u["offset"]]
-                    deserialize_agent_from_bytes(agent, raw_w_bytes, precision=precision)
-                    agent.eval()
+            reconstructed_chunks[c_idx].append(pred_pcm)
 
-                    with torch.no_grad():
-                        slice_pcm_sum += agent(t_coords).squeeze(1).cpu().numpy()
+        # Synthesize subbands per temporal chunk
+        synthesized_temporal_chunks = []
+        for band_list in reconstructed_chunks:
+            chunk_pcm = SubbandFilterBank.synthesize_subbands(band_list)
+            synthesized_temporal_chunks.append(chunk_pcm)
 
-                resynthesized_channels[ch_idx].append(slice_pcm_sum)
-
-        full_channels = [
-            np.concatenate(ch) if ch else np.zeros(100, dtype=np.float32) for ch in resynthesized_channels
-        ]
-        resyn_audio = np.column_stack(full_channels)
-        max_val = np.max(np.abs(resyn_audio))
-        if max_val > 1.0:
-            resyn_audio /= max_val
-
-        return resyn_audio
+        # Stitch temporal chunks using Overlap-Add crossfade
+        full_pcm = TemporalChunker.reconstruct_from_chunks(synthesized_temporal_chunks, sample_rate=sample_rate)
+        return full_pcm
