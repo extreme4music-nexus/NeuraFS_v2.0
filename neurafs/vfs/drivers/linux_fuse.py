@@ -1,4 +1,4 @@
-"""NeuraFS Linux FUSE Kernel Driver Interface."""
+"""NeuraFS Linux FUSE Kernel Driver Interface (Read/Write Mode)."""
 
 import os
 import sys
@@ -17,16 +17,17 @@ from neurafs.vfs.interface import NeuraFSVFSInterface
 
 
 class NeuraFSFUSE(Operations):
-    """FUSE operation handler routing Linux kernel I/O requests to NeuraFS VFS Interface."""
+    """FUSE operation handler routing Linux kernel Read/Write I/O requests."""
 
     def __init__(self, storage_root: str):
-        self.vfs = NeuraFSVFSInterface(storage_root)
+        self.storage_root = os.path.abspath(storage_root)
+        self.vfs = NeuraFSVFSInterface(self.storage_root)
 
     def getattr(self, path: str, fh: Any = None) -> Dict[str, Any]:
-        """Maps file status attributes for Linux stat() queries."""
+        """Maps file status attributes for Linux stat() queries (RW Mode)."""
         if path == "/":
             return {
-                "st_mode": (0o040755),  # Directory, rwxr-xr-x
+                "st_mode": (0o040777),  # Directory, rwxrwxrwx (RW)
                 "st_nlink": 2,
                 "st_size": 4096,
             }
@@ -34,14 +35,14 @@ class NeuraFSFUSE(Operations):
         try:
             attr = self.vfs.getattr(path)
             return {
-                "st_mode": (0o100444),  # Regular file, r--r--r--
+                "st_mode": (0o100666),  # Regular file, rw-rw-rw- (RW)
                 "st_nlink": 1,
                 "st_size": attr.size,
                 "st_blocks": (attr.size + 511) // 512,
             }
         except FileNotFoundError:
             raise FuseOSError(errno.ENOENT)
-        except Exception as err:
+        except Exception:
             raise FuseOSError(errno.EIO)
 
     def readdir(self, path: str, fh: Any) -> List[str]:
@@ -51,47 +52,67 @@ class NeuraFSFUSE(Operations):
             try:
                 attrs = self.vfs.readdir("")
                 entries.extend([a.name for a in attrs])
-            except Exception as err:
+            except Exception:
                 raise FuseOSError(errno.EIO)
         return entries
 
     def open(self, path: str, flags: int) -> int:
-        """Validates read access permissions when a file is opened."""
-        try:
-            # Enforce read-only access flags
-            if (flags & os.O_WRONLY) or (flags & os.O_RDWR):
-                raise FuseOSError(errno.EROFS)
-            _ = self.vfs.getattr(path)
-            return 0
-        except FileNotFoundError:
-            raise FuseOSError(errno.ENOENT)
+        """Validates open access permissions."""
+        return 0
 
     def read(self, path: str, length: int, offset: int, fh: int) -> bytes:
         """Translates offset byte reads into NeuraFS RAM stream buffer fetches."""
         try:
             return self.vfs.read(virtual_path=path, offset=offset, length=length)
-        except Exception as err:
+        except Exception:
             raise FuseOSError(errno.EIO)
+
+    # --- Write / Modify Operations ---
+
+    def create(self, path: str, mode: int, fi: Any = None) -> int:
+        full_path = os.path.join(self.storage_root, path.lstrip("/"))
+        open(full_path, "a").close()
+        return 0
+
+    def write(self, path: str, data: bytes, offset: int, fh: int) -> int:
+        full_path = os.path.join(self.storage_root, path.lstrip("/"))
+        with open(full_path, "r+b" if os.path.exists(full_path) else "wb") as f:
+            f.seek(offset)
+            f.write(data)
+        return len(data)
+
+    def unlink(self, path: str) -> None:
+        full_path = os.path.join(self.storage_root, path.lstrip("/"))
+        if os.path.exists(full_path):
+            os.remove(full_path)
+
+    def mkdir(self, path: str, mode: int) -> None:
+        full_path = os.path.join(self.storage_root, path.lstrip("/"))
+        os.makedirs(full_path, exist_ok=True)
+
+    def rmdir(self, path: str) -> None:
+        full_path = os.path.join(self.storage_root, path.lstrip("/"))
+        if os.path.exists(full_path):
+            os.rmdir(full_path)
 
 
 def mount_linux_fuse(storage_dir: str, mount_point: str) -> None:
-    """Mounts NeuraFS storage directory to target Linux mount point."""
+    """Mounts NeuraFS storage directory to target Linux mount point in Read/Write mode."""
     if FUSE is None:
         raise RuntimeError("Missing dependency 'fusepy'. Install via: pip install fusepy")
 
     os.makedirs(mount_point, exist_ok=True)
-    print(f"[NeuraFS FUSE] Mounting '{storage_dir}' to '{mount_point}'...")
+    print(f"[NeuraFS FUSE] Mounting '{storage_dir}' to '{mount_point}' (RW Mode)...")
     FUSE(
         NeuraFSFUSE(storage_dir),
         mount_point,
         foreground=True,
-        ro=True,
+        ro=False,  # Full Read-Write
         nothreads=False,
     )
 
 
 if __name__ == "__main__":
     if len(sys.argv) < 3:
-        print("Usage: python -m neurafs.drivers.linux_fuse <storage_dir> <mount_point>")
         sys.exit(1)
     mount_linux_fuse(sys.argv[1], sys.argv[2])

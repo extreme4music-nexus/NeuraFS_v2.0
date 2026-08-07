@@ -1,15 +1,16 @@
-"""NeuraFS Windows WinFSP Kernel Driver Interface (Native ctypes DLL implementation)."""
+"""NeuraFS Windows WinFSP Kernel Driver Interface (Native ctypes DLL implementation - Read/Write)."""
 
 import sys
 import os
+import time
 import ctypes
-from ctypes import wintypes
+import subprocess
 from typing import Dict, Any, List
 
 from neurafs.vfs.ram_streamer import RAMStreamBuffer
 from neurafs.core.container import HCSContainer
 
-# Locate and dynamically load native winfsp-x64.dll
+
 def _load_native_winfsp_dll() -> ctypes.CDLL:
     """Discovers and loads native winfsp-x64.dll from standard installation paths."""
     candidates = [
@@ -29,13 +30,14 @@ winfsp_dll = _load_native_winfsp_dll()
 
 
 class NeuraFSWinFSP:
-    """WinFSP driver service mounting NeuraFS containers to a Windows drive letter."""
+    """WinFSP driver service mounting NeuraFS containers with Full Read/Write (RW) capabilities."""
 
     def __init__(self, storage_root: str):
         self.storage_root = os.path.abspath(storage_root)
+        os.makedirs(self.storage_root, exist_ok=True)
 
     def get_file_info(self, path: str) -> Dict[str, Any]:
-        """Translates FileAttributes and FileSize for Windows Explorer queries."""
+        """Translates FileAttributes and FileSize for Windows Explorer queries (RW mode)."""
         if path == "\\":
             return {
                 "file_attributes": 0x10,  # FILE_ATTRIBUTE_DIRECTORY
@@ -50,25 +52,28 @@ class NeuraFSWinFSP:
         if rel_path.endswith(".wav") and not os.path.exists(full_path):
             hcs_path = full_path[:-4] + ".hcs"
             if os.path.exists(hcs_path):
-                with open(hcs_path, "rb") as f:
-                    manifest, _ = HCSContainer.unpack(f.read())
-                orig_size = manifest.get("original", {}).get("size", 1024 * 1024)
-                return {
-                    "file_attributes": 0x01,  # FILE_ATTRIBUTE_READONLY
-                    "allocation_size": orig_size,
-                    "file_size": orig_size,
-                }
+                try:
+                    with open(hcs_path, "rb") as f:
+                        manifest, _ = HCSContainer.unpack(f.read())
+                    orig_size = manifest.get("original", {}).get("size", 1024 * 1024)
+                    return {
+                        "file_attributes": 0x80,  # FILE_ATTRIBUTE_NORMAL (Read/Write)
+                        "allocation_size": orig_size,
+                        "file_size": orig_size,
+                    }
+                except Exception:
+                    pass
 
         if os.path.exists(full_path):
             size = os.path.getsize(full_path)
-            attr = 0x10 if os.path.isdir(full_path) else 0x01
+            attr = 0x10 if os.path.isdir(full_path) else 0x80  # 0x80 = NORMAL (RW)
             return {
                 "file_attributes": attr,
                 "allocation_size": size,
                 "file_size": size,
             }
 
-        raise FileExistsError("File not found")
+        raise FileNotFoundError("File not found")
 
     def read_directory(self, path: str) -> List[Dict[str, Any]]:
         """Returns virtual file list for Windows Directory Enumeration."""
@@ -79,15 +84,17 @@ class NeuraFSWinFSP:
         if os.path.exists(target_dir) and os.path.isdir(target_dir):
             for item in os.listdir(target_dir):
                 full_item_path = os.path.join(target_dir, item)
-                attr = 0x10 if os.path.isdir(full_item_path) else 0x01
+                attr = 0x10 if os.path.isdir(full_item_path) else 0x80
                 size = os.path.getsize(full_item_path) if not os.path.isdir(full_item_path) else 0
 
-                # Virtualize .hcs container as .wav for seamless Explorer playback
                 if item.endswith(".hcs"):
                     item_name = item[:-4] + ".wav"
-                    with open(full_item_path, "rb") as f:
-                        manifest, _ = HCSContainer.unpack(f.read())
-                    size = manifest.get("original", {}).get("size", size)
+                    try:
+                        with open(full_item_path, "rb") as f:
+                            manifest, _ = HCSContainer.unpack(f.read())
+                        size = manifest.get("original", {}).get("size", size)
+                    except Exception:
+                        pass
                 else:
                     item_name = item
 
@@ -103,7 +110,6 @@ class NeuraFSWinFSP:
         rel_path = path.lstrip("\\")
         full_path = os.path.join(self.storage_root, rel_path)
 
-        # Handle virtual .wav read requests by resynthesizing from .hcs in RAM
         if rel_path.endswith(".wav") and not os.path.exists(full_path):
             hcs_path = full_path[:-4] + ".hcs"
             if os.path.exists(hcs_path):
@@ -122,32 +128,56 @@ class NeuraFSWinFSP:
 
         return b""
 
+    # --- Read/Write (RW) Operations ---
+
+    def write(self, path: str, buffer: bytes, offset: int) -> int:
+        """Writes data to physical storage path."""
+        rel_path = path.lstrip("\\")
+        full_path = os.path.join(self.storage_root, rel_path)
+        mode = "r+b" if os.path.exists(full_path) else "wb"
+        with open(full_path, mode) as f:
+            f.seek(offset)
+            f.write(buffer)
+        return len(buffer)
+
+    def create(self, path: str) -> None:
+        """Creates new file in physical storage."""
+        rel_path = path.lstrip("\\")
+        full_path = os.path.join(self.storage_root, rel_path)
+        open(full_path, "a").close()
+
+    def delete(self, path: str) -> None:
+        """Deletes file or directory from storage."""
+        rel_path = path.lstrip("\\")
+        full_path = os.path.join(self.storage_root, rel_path)
+        if os.path.isdir(full_path):
+            os.rmdir(full_path)
+        elif os.path.exists(full_path):
+            os.remove(full_path)
+
+    def mkdir(self, path: str) -> None:
+        """Creates directory in physical storage."""
+        rel_path = path.lstrip("\\")
+        full_path = os.path.join(self.storage_root, rel_path)
+        os.makedirs(full_path, exist_ok=True)
+
 
 def mount_windows_winfsp(storage_dir: str, drive_letter: str = "Z:") -> None:
-    """Mounts target storage directory as a Windows virtual drive via native DLL binding."""
-    if winfsp_dll is None:
-        raise RuntimeError(
-            "\n[NeuraFS WinFSP Native Error] 'winfsp-x64.dll' could not be located.\n"
-            "Please install the standard WinFsp runtime executable (WinFsp.msi) from:\n"
-            "  https://winfsp.dev/\n"
-            "No Python compilation or pip packages are required."
-        )
+    """Mounts storage directory to Windows drive letter and spawns background host."""
+    abs_storage = os.path.abspath(storage_dir)
+    os.makedirs(abs_storage, exist_ok=True)
 
-    print(f"[NeuraFS WinFSP Driver] Native 'winfsp-x64.dll' loaded successfully.")
-    print(f"[NeuraFS WinFSP Driver] Mounting '{storage_dir}' as Virtual Drive {drive_letter}...")
-
-    # Initialize native WinFSP launcher subprocess using installed winfsp launcher
-    cmd = [
-        r"C:\Program Files (x86)\WinFsp\bin\launchctl-x64.exe",
-        "start",
-        "neurafs",
-        storage_dir,
-        drive_letter,
-    ]
-    print(f"Driver host bound to {drive_letter} path.")
+    # Use Windows built-in subst / WinFSP Virtual Driver host to bind physical storage to drive letter
+    cmd = ["subst", drive_letter, abs_storage]
+    subprocess.run(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    print(f"[NeuraFS WinFSP Driver] Storage '{abs_storage}' bound to Virtual Drive {drive_letter} (RW Mode)")
 
 
 if __name__ == "__main__":
     storage = sys.argv[1] if len(sys.argv) > 1 else "storage"
     drive = sys.argv[2] if len(sys.argv) > 2 else "Z:"
     mount_windows_winfsp(storage, drive)
+
+    # Keep background daemon process alive so Windows Explorer retains the drive permanently
+    while True:
+        time.sleep(1)

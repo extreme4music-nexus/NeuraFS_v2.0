@@ -38,10 +38,14 @@ class StorageManager:
 
     @classmethod
     def init_structure(cls, target_path: str) -> None:
-        """Ensures documents, media, and .temp directories exist."""
-        os.makedirs(os.path.join(target_path, "documents"), exist_ok=True)
-        os.makedirs(os.path.join(target_path, "media"), exist_ok=True)
-        os.makedirs(os.path.join(target_path, ".temp"), exist_ok=True)
+        """Ensures documents, media, and .temp directories exist safely."""
+        try:
+            os.makedirs(os.path.join(target_path, "documents"), exist_ok=True)
+            os.makedirs(os.path.join(target_path, "media"), exist_ok=True)
+            os.makedirs(os.path.join(target_path, ".temp"), exist_ok=True)
+        except Exception:
+            # Handles read-only VFS drives and pending Windows mount points gracefully
+            pass
 
     @classmethod
     def set_path(cls, new_path: str) -> str:
@@ -74,8 +78,11 @@ class StorageManager:
         }
 
         if exists:
-            usage = shutil.disk_usage(path)
-            stats["free_space_gb"] = round(usage.free / (1024 ** 3), 2)
+            try:
+                usage = shutil.disk_usage(path)
+                stats["free_space_gb"] = round(usage.free / (1024 ** 3), 2)
+            except Exception:
+                pass
 
         return stats
 

@@ -11,26 +11,9 @@ from neurafs.web.manager import start_web, stop_web, restart_web, status_web
 from neurafs.benchmarks.manager import BenchmarkManager
 from neurafs.core.storage import StorageManager
 from neurafs.sdk.python.sdk import NeuraFSSDK
+from neurafs.vfs.service_manager import VFSServiceManager
 
-def handle_benchmark(args):
-    print(f"--- Running NeuraFS {args.type.capitalize()} Benchmark ---")
-    logger = BenchmarkLogger(f"{args.type}_benchmark")
-    logger.start()
-    
-    # Имитација на реален прогрес бар низ фазите
-    phases = ["Loading models", "Pre-encoding", "Decoding", "Calculating Loss"]
-    with tqdm(total=len(phases), desc="Processing") as pbar:
-        for phase in phases:
-            pbar.set_description(f"Phase: {phase}")
-            # Твојата реална логика оди тука:
-            # run_decode_benchmark() 
-            time.sleep(1) # Замени со реалниот повик
-            pbar.update(1)
-            
-    # Зачувај го JSON лог фајлот (Внеси реални патеки на фајловите)
-    report = logger.stop_and_save("dummy_input.wav", "dummy_output.hcs")
-    print(f"\n✅ Benchmark finished! Log saved. RAM used: {report['ram_usage_mb']} MB")
-    
+
 def handle_api(args):
     """Routes API management commands to APIManager."""
     if args.action == "start":
@@ -39,6 +22,9 @@ def handle_api(args):
         stop_api()
     elif args.action == "restart":
         restart_api(host=args.host, port=args.port, reload=args.reload, daemon=args.daemon)
+    elif args.action == "status":
+        status_api()
+
 
 def handle_web(args):
     """Routes Web UI management commands."""
@@ -48,11 +34,15 @@ def handle_web(args):
         stop_web()
     elif args.action == "restart":
         restart_web(port=args.port, daemon=args.daemon)
+    elif args.action == "status":
+        status_web()
+
 
 def handle_benchmark(args):
     """Routes benchmark commands."""
     BenchmarkManager.run(benchmark_type=args.type)
-    
+
+
 def handle_storage(args):
     """Routes storage configuration and maintenance commands."""
     if args.action == "set":
@@ -69,7 +59,7 @@ def handle_storage(args):
         print(f" • Free Space : {info['free_space_gb']} GB")
         print(" • Subfolders :")
         for sub, ok in info["subfolders"].items():
-            print(f"   - {sub}/ : {'OK ✅' if ok else 'MISSING ❌'}")
+            print(f"    - {sub}/ : {'OK ✅' if ok else 'MISSING ❌'}")
         print()
 
     elif args.action == "remove":
@@ -85,6 +75,20 @@ def handle_storage(args):
         except Exception as err:
             print(f"❌ Storage move failed: {err}")
 
+
+def handle_vfs(args):
+    """Routes VFS management commands to VFSServiceManager."""
+    if args.action == "mount":
+        target_path = getattr(args, "storage_path", None) or getattr(args, "target", None)
+        samba_flag = getattr(args, "samba", False)
+        VFSServiceManager.mount(target=target_path, enable_samba=samba_flag)
+    elif args.action == "umount":
+        target_path = getattr(args, "target", None)
+        VFSServiceManager.umount(target=target_path)
+    elif args.action == "status":
+        VFSServiceManager.status()
+
+
 def main():
     parser = argparse.ArgumentParser(description="NeuraFS Neural Media Storage CLI")
     subparsers = parser.add_subparsers(dest="command", help="Available commands")
@@ -99,7 +103,7 @@ def main():
     decode_parser = subparsers.add_parser("decode", help="Decode .hcs container to .wav")
     decode_parser.add_argument("input", help="Path to input .hcs container")
     decode_parser.add_argument("output", help="Path to output .wav file")
-    
+
     # API Subcommand Structure
     api_parser = subparsers.add_parser("api", help="Manage NeuraFS FastAPI server")
     api_subparsers = api_parser.add_subparsers(dest="action", required=True)
@@ -139,29 +143,37 @@ def main():
     # Benchmark Subcommand
     bench_parser = subparsers.add_parser("benchmark", help="Run benchmarks")
     bench_parser.add_argument("--type", choices=["encode", "decode", "full"], default="decode", help="Type of benchmark to run")
-    
+
     # Storage Subcommand Structure
     storage_parser = subparsers.add_parser("storage", help="Manage universal storage location and integrity")
     storage_subparsers = storage_parser.add_subparsers(dest="action", required=True)
 
-    # neurafs storage set <path>
     set_parser = storage_subparsers.add_parser("set", help="Set universal storage path")
     set_parser.add_argument("path", type=str, help="Absolute or relative target storage directory path")
 
-    # neurafs storage check
     storage_subparsers.add_parser("check", help="Verify storage integrity, permissions, and free space")
-
-    # neurafs storage remove
     storage_subparsers.add_parser("remove", help="Reset storage configuration to default directory")
 
-    # neurafs storage move <current_path> <new_path>
     move_parser = storage_subparsers.add_parser("move", help="Relocate storage contents to a new directory")
     move_parser.add_argument("new_path", type=str, help="Target new directory path")
-    move_parser.add_argument("current_path", type=str, nargs="?", default=None, help="Optional source directory path")    
+    move_parser.add_argument("current_path", type=str, nargs="?", default=None, help="Optional source directory path")
 
     # Inspect command
     inspect_parser = subparsers.add_parser("inspect", help="Inspect .hcs container metadata")
     inspect_parser.add_argument("input", help="Path to .hcs container")
+
+    # VFS Subcommand Structure
+    vfs_parser = subparsers.add_parser("vfs", help="Manage Auto-Detecting Persistent Virtual File System (VFS)")
+    vfs_subparsers = vfs_parser.add_subparsers(dest="action", required=True)
+
+    mount_parser = vfs_subparsers.add_parser("mount", help="Mount persistent virtual partition (Auto-detects OS)")
+    mount_parser.add_argument("target", nargs="?", default=None, help="Target drive letter (e.g. Z:) or mount dir")
+    mount_parser.add_argument("--samba", action="store_true", help="Enable Samba network share service")
+
+    umount_parser = vfs_subparsers.add_parser("umount", help="Unmount virtual partition & clear persistence")
+    umount_parser.add_argument("target", nargs="?", default=None, help="Optional target partition to unmount")
+
+    vfs_subparsers.add_parser("status", help="Show current VFS mount, OS driver, and persistence status")
 
     args = parser.parse_args()
 
@@ -182,6 +194,8 @@ def main():
         handle_api(args)
     elif args.command == "web":
         handle_web(args)
+    elif args.command == "vfs":
+        handle_vfs(args)
     else:
         parser.print_help()
 
