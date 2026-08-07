@@ -31,6 +31,13 @@ class APIManager:
 
         cls.clear_pid()
         return None
+    
+    @classmethod
+    def write_pid(cls, pid: int) -> None:
+        """Writes process PID to persistent PID file."""
+        pid_file = cls.get_pid_file()
+        pid_file.parent.mkdir(parents=True, exist_ok=True)
+        pid_file.write_text(str(pid), encoding="utf-8")
 
     @staticmethod
     def get_pid_file() -> Path:

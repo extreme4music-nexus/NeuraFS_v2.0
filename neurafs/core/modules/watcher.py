@@ -1,10 +1,19 @@
-"""NeuraFS Storage File System Watcher Module."""
+"""NeuraFS Storage File System Watcher Daemon Module."""
 
 import os
+import sys
 import time
+import signal
+import subprocess
 import threading
 from pathlib import Path
 from typing import Optional, Callable, Any
+
+try:
+    import psutil
+    PSUTIL_AVAILABLE = True
+except ImportError:
+    PSUTIL_AVAILABLE = False
 
 try:
     from watchdog.observers import Observer
@@ -12,6 +21,9 @@ try:
     WATCHDOG_AVAILABLE = True
 except ImportError:
     WATCHDOG_AVAILABLE = False
+
+
+PID_FILE = Path.home() / ".neurafs" / "watcher.pid"
 
 
 class StorageEventHandler(FileSystemEventHandler if WATCHDOG_AVAILABLE else object):
@@ -49,7 +61,7 @@ class StorageEventHandler(FileSystemEventHandler if WATCHDOG_AVAILABLE else obje
             try:
                 current_size = os.path.getsize(file_path)
                 with open(file_path, "rb"):
-                    pass  # Attempt exclusive read access
+                    pass
                 if current_size == last_size and current_size > 0:
                     return True
                 last_size = current_size
@@ -68,13 +80,16 @@ class StorageEventHandler(FileSystemEventHandler if WATCHDOG_AVAILABLE else obje
         def process():
             self._active_jobs.add(file_path)
             if self._wait_until_settled(file_path):
-                print(f"\n👁️  [NeuraFS Watcher] Detected settled new file: {os.path.basename(file_path)}")
-                if self.callback:
-                    self.callback(file_path)
-            time.sleep(3)
+                from neurafs.core.modules.queue_manager import QueueManager
+                QueueManager.add_or_update_job(file_path)
             self._active_jobs.discard(file_path)
 
         threading.Thread(target=process, daemon=True).start()
+
+    def on_deleted(self, event):
+        if not event.is_directory:
+            from neurafs.core.modules.queue_manager import QueueManager
+            QueueManager.handle_file_deleted(event.src_path)
 
     def on_created(self, event):
         if not event.is_directory:
@@ -86,45 +101,127 @@ class StorageEventHandler(FileSystemEventHandler if WATCHDOG_AVAILABLE else obje
 
 
 class NeuraFSWatcher:
-    """Background Daemon Observer managing file system monitoring on physical storage."""
-
-    _observer: Optional[Any] = None
-    _is_running: bool = False
+    """Background Daemon Manager for Watcher process."""
 
     @classmethod
-    def start(cls, target_path: str, callback: Optional[Callable[[str], None]] = None) -> bool:
-        """Starts file system watcher in background thread."""
+    def _get_pid(cls) -> Optional[int]:
+        if PID_FILE.exists():
+            try:
+                return int(PID_FILE.read_text().strip())
+            except ValueError:
+                pass
+        return None
+
+    @classmethod
+    def is_active(cls) -> bool:
+        """Checks if background Watcher daemon process is alive."""
+        pid = cls._get_pid()
+        if not pid:
+            return False
+        if PSUTIL_AVAILABLE:
+            return psutil.pid_exists(pid)
+        try:
+            if sys.platform == "win32":
+                import ctypes
+                kernel32 = ctypes.windll.kernel32
+                PROCESS_QUERY_LIMITED_INFORMATION = 0x1000
+                h = kernel32.OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, False, pid)
+                if h:
+                    kernel32.CloseHandle(h)
+                    return True
+                return False
+            else:
+                os.kill(pid, 0)
+                return True
+        except Exception:
+            return False
+
+    @classmethod
+    def start_daemon(cls) -> bool:
+        """Launches Watcher in a detached background daemon process."""
         if not WATCHDOG_AVAILABLE:
             print("⚠️  [NeuraFS Watcher] 'watchdog' package missing. Run: pip install watchdog")
             return False
 
-        if cls._is_running:
+        if cls.is_active():
+            print("[NeuraFS Watcher] Background daemon already running.")
             return True
+
+        PID_FILE.parent.mkdir(parents=True, exist_ok=True)
+        python_exe = sys.executable
+        cmd = [python_exe, "-m", "neurafs.core.modules.watcher"]
+
+        kwargs = {}
+        if sys.platform == "win32":
+            CREATE_NO_WINDOW = 0x08000000
+            kwargs["creationflags"] = subprocess.CREATE_NEW_PROCESS_GROUP | subprocess.DETACHED_PROCESS
+
+        proc = subprocess.Popen(
+            cmd,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            stdin=subprocess.DEVNULL,
+            **kwargs
+        )
+        PID_FILE.write_text(str(proc.pid))
+        print(f"👁️  [NeuraFS Watcher] Launched background watcher daemon (PID: {proc.pid})")
+        return True
+
+    @classmethod
+    def stop_daemon(cls) -> bool:
+        """Stops background Watcher daemon process."""
+        pid = cls._get_pid()
+        if not pid:
+            return True
+
+        try:
+            if sys.platform == "win32":
+                subprocess.run(["taskkill", "/F", "/PID", str(pid)], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+            else:
+                os.kill(pid, signal.SIGTERM)
+        except Exception:
+            pass
+
+        if PID_FILE.exists():
+            try:
+                os.remove(PID_FILE)
+            except OSError:
+                pass
+
+        print("👁️  [NeuraFS Watcher] Stopped background watcher daemon.")
+        return True
+
+    @classmethod
+    @classmethod
+    def run_forever(cls):
+        """Blocking execution loop meant for detached background daemon process."""
+        from neurafs.core.storage import StorageManager
+        from neurafs.core.modules.queue_manager import QueueManager
+
+        target_path = StorageManager.get_path()
+
+        if not WATCHDOG_AVAILABLE:
+            sys.exit(1)
 
         if not os.path.exists(target_path):
             os.makedirs(target_path, exist_ok=True)
 
-        event_handler = StorageEventHandler(callback=callback)
-        cls._observer = Observer()
-        cls._observer.schedule(event_handler, path=target_path, recursive=True)
-        cls._observer.start()
-        cls._is_running = True
-        print(f"👁️  [NeuraFS Watcher] Active & monitoring storage: '{target_path}'")
-        return True
+        # Start Queue Processing Loop
+        QueueManager.start_worker()
 
-    @classmethod
-    def stop(cls) -> bool:
-        """Stops background file watcher cleanly."""
-        if cls._observer and cls._is_running:
-            cls._observer.stop()
-            cls._observer.join()
-            cls._is_running = False
-            cls._observer = None
-            print("👁️  [NeuraFS Watcher] Stopped background monitoring.")
-            return True
-        return False
+        event_handler = StorageEventHandler()
+        observer = Observer()
+        observer.schedule(event_handler, path=target_path, recursive=True)
+        observer.start()
 
-    @classmethod
-    def is_active(cls) -> bool:
-        """Returns True if background thread observer is alive."""
-        return cls._is_running and cls._observer is not None and cls._observer.is_alive()
+        try:
+            while True:
+                time.sleep(1)
+        except (KeyboardInterrupt, SystemExit):
+            observer.stop()
+            QueueManager.stop_worker()
+        observer.join()
+
+
+if __name__ == "__main__":
+    NeuraFSWatcher.run_forever()

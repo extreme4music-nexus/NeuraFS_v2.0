@@ -1,9 +1,12 @@
 """NeuraFS Zero-Disk-Write Audio Extraction & Loader Module."""
 
 import io
+import sys
+import warnings
 import subprocess
 import numpy as np
 import scipy.io.wavfile as wavfile
+from scipy.io.wavfile import WavFileWarning
 from typing import Tuple
 
 
@@ -42,12 +45,18 @@ class AudioLoader:
             "-ac", "2",
             "pipe:1"
         ]
+
+        # Prevent CMD window pop-ups on Windows
+        kwargs = {}
+        if sys.platform == "win32":
+            kwargs["creationflags"] = 0x08000000  # CREATE_NO_WINDOW
         
         proc = subprocess.Popen(
             command,
             stdin=subprocess.PIPE,
             stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE
+            stderr=subprocess.PIPE,
+            **kwargs
         )
         raw_pcm, _ = proc.communicate(input=file_bytes)
         

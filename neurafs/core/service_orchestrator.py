@@ -18,6 +18,7 @@ from neurafs.core.storage import StorageManager
 from neurafs.api.manager import start_api, stop_api, status_api
 from neurafs.web.manager import start_web, stop_web, status_web
 from neurafs.core.modules.watcher import NeuraFSWatcher
+from neurafs.core.modules.queue_manager import QueueManager
 
 
 class ServiceOrchestrator:
@@ -41,6 +42,13 @@ class ServiceOrchestrator:
             print("[NeuraFS Auto-Healing] Background services offline. Auto-recovering...")
             cls.start_all()
             return True
+        
+        watcher_ok = NeuraFSWatcher.is_active()
+        if not (vfs_ok and api_ok and watcher_ok):
+            print("[NeuraFS Auto-Healing] Background services offline. Auto-recovering...")
+            cls.start_all()
+            return True
+            
         return True
         
     @classmethod
@@ -104,10 +112,14 @@ class ServiceOrchestrator:
         else:
             results["samba"] = "N/A (Windows Native SMB / Samba not installed)"
         
-        # Start File System Watcher
+        # 5. Start File System Watcher Daemon
         print("[NeuraFS Watcher] Launching Background File Watcher...")
-        storage_path = StorageManager.get_path()
-        NeuraFSWatcher.start(storage_path)
+        try:
+            NeuraFSWatcher.start_daemon()
+            results["watcher"] = "RUNNING ✅"
+        except Exception as err:
+            results["watcher"] = f"FAILED ❌ ({err})"
+            print(f" ⚠️ Watcher Error: {err}")
 
         # Register unified boot persistence
         cls.enable_autostart()
@@ -117,43 +129,73 @@ class ServiceOrchestrator:
 
     @classmethod
     def stop_all(cls) -> Dict[str, Any]:
-        """Executes clean shutdown of all background services."""
+        """Executes clean shutdown of all background services and unregisters boot persistence."""
         print("\n🛑 --- Stopping NeuraFS Ecosystem Services ---")
 
-        print("[1/4] Disabling Samba Network Share...")
+        # 1. Disable OS Boot Persistence
+        print("[1/5] Unregistering OS Boot Persistence...")
+        try:
+            cls.disable_autostart()
+        except Exception:
+            pass
+
+        # 2. Disable Samba Share
+        print("[2/5] Disabling Samba Network Share...")
         try:
             if SambaManager.is_available():
                 SambaManager.remove_share()
         except Exception:
             pass
 
-        print("[2/4] Stopping Express Web Dashboard...")
+        # 3. Stop Watcher Daemon
+        print("[3/5] Stopping Background File Watcher...")
+        try:
+            NeuraFSWatcher.stop_daemon()
+        except Exception:
+            pass
+
+        # 4. Stop Express Web Dashboard
+        print("[4/5] Stopping Express Web Dashboard...")
         try:
             stop_web()
         except Exception:
             pass
 
-        print("[3/4] Stopping FastAPI Engine Gateway...")
+        # 5. Stop FastAPI Engine
+        print("[5/5] Stopping FastAPI Engine Gateway...")
         try:
             stop_api()
         except Exception:
             pass
 
-        print("[4/4] Unmounting Virtual File System...")
+        # 6. Unmount VFS
+        print("[6/6] Unmounting Virtual File System...")
         try:
             VFSServiceManager.umount()
         except Exception:
             pass
-        
-        print("[NeuraFS Watcher] Stopping Background File Watcher...")
+            
+        # 7. Execute State Database Recovery & Self-Healing
         try:
-            NeuraFSWatcher.stop()
+            from neurafs.core.modules.state_db import StateManager
+            recovered = StateManager.recover_interrupted_states()
+            if recovered > 0:
+                print(f"[NeuraFS State Recovery] Restored {recovered} interrupted jobs back to queue.")
         except Exception:
             pass
 
-        print("✅ All NeuraFS background services stopped cleanly.\n")
+        print("✅ All NeuraFS background services and boot persistence stopped cleanly.\n")
         return {"status": "stopped"}
-
+        
+    @classmethod
+    def restart_all(cls) -> Dict[str, Any]:
+        """Executes full ecosystem shutdown followed by clean startup sequence."""
+        print("\n🔄 --- Initiating Full NeuraFS Ecosystem Restart ---")
+        cls.stop_all()
+        time.sleep(1.5)
+        cls.start_all()
+        return {"status": "restarted"}
+        
     @classmethod
     def status_all(cls) -> None:
         """Prints aggregated status report across all background services."""
@@ -186,9 +228,18 @@ class ServiceOrchestrator:
         else:
             print(" • Samba Share     : N/A (Windows SMB Host)")
         
+        # Check File Watcher
         watcher_active = NeuraFSWatcher.is_active()
         print(f" • File Watcher    : {'ACTIVE ✅' if watcher_active else 'INACTIVE ❌'}")
-
+        
+        # Check Que Manager
+        try:
+            from neurafs.core.modules.queue_manager import QueueManager
+            q = QueueManager.get_status_summary()
+            print(f" • Queue Metrics   : {q['pending']} Pending, {q['processing']} Processing")
+        except Exception:
+            pass
+        
         # Check Autostart Status
         is_auto = cls.is_autostart_enabled()
         print(f" • Boot Persistence: {'ENABLED ✅' if is_auto else 'DISABLED ❌'}")
