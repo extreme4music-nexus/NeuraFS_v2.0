@@ -70,7 +70,17 @@ def find_free_windows_drive() -> str:
 
 class VFSServiceManager:
     """Manages VFS driver lifecycle, OS persistence services, and StorageManager integration."""
-
+    
+    @classmethod
+    def is_mounted(cls) -> bool:
+        """Checks if a NeuraFS VFS virtual partition is currently mounted and accessible."""
+        state = load_vfs_state()
+        if state and state.get("status") == "mounted":
+            target = state.get("virtual_target")
+            if target and os.path.exists(target):
+                return True
+        return False
+    
     @classmethod
     def mount(
         cls,
@@ -205,30 +215,7 @@ class VFSServiceManager:
     def _umount_windows(drive_letter: str) -> None:
         cmd = ["subst", drive_letter, "/d"] if len(drive_letter) == 2 else ["net", "use", drive_letter, "/delete", "/y"]
         subprocess.run(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-
-    @staticmethod
-    def _register_windows_autostart(physical_storage: str, drive_letter: str) -> None:
-        """Registers Windows Task Scheduler job to re-mount at boot/logon."""
-        task_name = "NeuraFS_VFS_AutoMount"
-        python_exe = sys.executable
-        driver_script = os.path.join(os.path.dirname(__file__), "drivers", "windows_winfsp.py")
-        action = f'"{python_exe}" "{driver_script}" "{physical_storage}" "{drive_letter}"'
-
-        cmd = [
-            "schtasks", "/create", "/tn", task_name,
-            "/tr", action, "/sc", "onlogon", "/f"
-        ]
-        subprocess.run(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-        print(f"[NeuraFS Persistence] Registered Task Scheduler auto-start job '{task_name}'")
-
-    @staticmethod
-    def _remove_windows_autostart() -> None:
-        task_name = "NeuraFS_VFS_AutoMount"
-        cmd = ["schtasks", "/delete", "/tn", task_name, "/f"]
-        subprocess.run(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-
-    # --- Linux Methods ---
-
+    
     @staticmethod
     def _mount_linux(physical_storage: str, mount_point: str) -> None:
         python_exe = sys.executable
@@ -238,9 +225,43 @@ class VFSServiceManager:
     @staticmethod
     def _umount_linux(mount_point: str) -> None:
         subprocess.run(["fusermount", "-u", mount_point], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    
+    @staticmethod
+    def _register_windows_autostart(physical_storage: str, drive_letter: str) -> None:
+        """Smart cleanup of old tasks before registering a clean, single Task Scheduler job."""
+        task_name = "NeuraFS_VFS_AutoMount"
+
+        # 1. Прво задолжително се бришат сите постоечки/застарени NeuraFS задачи
+        VFSServiceManager._remove_windows_autostart()
+
+        # 2. Се регистрира само најновата и свежа задача
+        python_exe = sys.executable
+        driver_script = os.path.join(os.path.dirname(__file__), "drivers", "windows_winfsp.py")
+        action = f'"{python_exe}" "{driver_script}" "{physical_storage}" "{drive_letter}"'
+
+        cmd = [
+            "schtasks", "/create", "/tn", task_name,
+            "/tr", action, "/sc", "onlogon", "/f"
+        ]
+        subprocess.run(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        print(f"[NeuraFS Persistence] Cleaned old tasks and registered new Task Scheduler job '{task_name}'")
 
     @staticmethod
+    def _remove_windows_autostart() -> None:
+        """Forcibly removes any existing NeuraFS Task Scheduler jobs."""
+        task_name = "NeuraFS_VFS_AutoMount"
+        cmd = ["schtasks", "/delete", "/tn", task_name, "/f"]
+        subprocess.run(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+
+    # --- Linux Methods ---
+    
+    @staticmethod
     def _register_linux_autostart(physical_storage: str, mount_point: str) -> None:
+        """Smart cleanup of old systemd user units before creating a fresh unit."""
+        # 1. Прво се оневозможува и чисти стариот сервис
+        VFSServiceManager._remove_linux_autostart()
+
+        # 2. Се запишува и активира само новиот сервис
         user_systemd_dir = Path.home() / ".config" / "systemd" / "user"
         user_systemd_dir.mkdir(parents=True, exist_ok=True)
         service_file = user_systemd_dir / "neurafs-vfs.service"
@@ -260,9 +281,11 @@ WantedBy=default.target
         service_file.write_text(unit_content, encoding="utf-8")
         subprocess.run(["systemctl", "--user", "daemon-reload"], check=False)
         subprocess.run(["systemctl", "--user", "enable", "neurafs-vfs.service"], check=False)
+        print(f"[NeuraFS Persistence] Cleaned old services and registered new systemd unit '{service_file}'")
 
     @staticmethod
     def _remove_linux_autostart() -> None:
+        """Disables and unlinks any existing NeuraFS systemd user services."""
         subprocess.run(["systemctl", "--user", "disable", "neurafs-vfs.service"], check=False)
         service_file = Path.home() / ".config" / "systemd" / "user" / "neurafs-vfs.service"
         if service_file.exists():
@@ -270,6 +293,7 @@ WantedBy=default.target
                 os.remove(service_file)
             except OSError:
                 pass
+        subprocess.run(["systemctl", "--user", "daemon-reload"], check=False)
 
     @staticmethod
     def _enable_samba_share(physical_storage: str) -> None:

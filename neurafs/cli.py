@@ -5,6 +5,7 @@ import json
 import sys
 from neurafs.core.initializer import NeuraFSInitializer
 from neurafs.core.storage import StorageManager
+from neurafs.core.service_orchestrator import ServiceOrchestrator
 from neurafs.utils.logger import BenchmarkLogger
 from neurafs.api.manager import start_api, stop_api, restart_api, status_api
 from neurafs.web.manager import start_web, stop_web, restart_web, status_web
@@ -16,15 +17,71 @@ from neurafs.vfs.service_manager import VFSServiceManager
 def handle_init(args):
     """Routes initialization commands to NeuraFSInitializer."""
     result = NeuraFSInitializer.initialize_system(custom_path=args.path)
+    diag = result['diagnostics']
+
     print("\n🚀 --- NeuraFS System Initialized ---")
     print(f" • Status       : {result['status'].upper()} ✅")
     print(f" • Storage Root : {result['storage_path']}")
     print(f" • Config File  : {result['config_file']}")
-    print(f" • Subfolders   : {', '.join(result['subfolders'])}\n")
+    print(f" • Subfolders   : {', '.join(result['subfolders'])}")
+
+    print("\n🔍 --- Pre-Flight Environmental Check ---")
+    print(f" • Host OS      : {diag['os']}")
+
+    # VFS Driver Check
+    vfs = diag['vfs_driver']
+    if vfs['installed']:
+        print(f" • VFS Driver   : READY ✅ ({vfs.get('path') or 'Native System Library'})")
+    else:
+        print(" • VFS Driver   : MISSING ⚠️")
+        print(f"   👉 Guidance  : {vfs['guide']}")
+
+    # Samba Check
+    samba = diag['samba']
+    if diag['os'] == "LINUX":
+        print(f" • Samba VFS    : {samba['status_str']}")
+        if not samba['available']:
+            print(f"   👉 Guidance  : {samba['guide']}")
+    else:
+        print(f" • Samba VFS    : {samba['status_str']}")
+        print(f"   👉 Network Share (GUI) : {samba['guide_gui']}")
+        print(f"   👉 Network Share (CLI) : {samba['guide_cli']}")
+
+    # Auto-start ecosystem
+    ServiceOrchestrator.ensure_services_running()
+    print()
+
+
+def handle_service(args):
+    """Routes master service orchestration commands."""
+    if args.action == "start":
+        ServiceOrchestrator.start_all()
+    elif args.action == "stop":
+        ServiceOrchestrator.stop_all()
+    elif args.action == "status":
+        ServiceOrchestrator.status_all()
+    elif args.action == "autostart":
+        if args.state == "on":
+            ok = ServiceOrchestrator.enable_autostart()
+            if ok:
+                print("✅ Master Boot Service registered for automatic OS startup.")
+        elif args.state == "off":
+            ok = ServiceOrchestrator.disable_autostart()
+            if ok:
+                print("🔄 Master Boot Service unregistered from automatic OS startup.")
+        elif args.state == "status":
+            enabled = ServiceOrchestrator.is_autostart_enabled()
+            print(f" • Boot Persistence: {'ENABLED ✅' if enabled else 'DISABLED ❌'}")
+        
+        
+def handle_inspect(args):
+    """Routes inspect command to NeuraFSSDK."""
+    manifest = NeuraFSSDK.inspect(args.input)
+    print(json.dumps(manifest, indent=2))
 
 
 def handle_api(args):
-    """Routes API management commands to APIManager."""
+    """Routes API management commands."""
     if args.action == "start":
         start_api(host=args.host, port=args.port, reload=args.reload, daemon=args.daemon)
     elif args.action == "stop":
@@ -53,11 +110,10 @@ def handle_benchmark(args):
 
 
 def handle_storage(args):
-    """Routes storage configuration and maintenance commands."""
+    """Routes storage configuration commands."""
     if args.action == "set":
         new_path = StorageManager.set_path(args.path)
         print(f"✅ Storage root path successfully set to: {new_path}")
-
     elif args.action == "check":
         info = StorageManager.check()
         print("\n📂 --- NeuraFS Universal Storage Report ---")
@@ -70,11 +126,9 @@ def handle_storage(args):
         for sub, ok in info["subfolders"].items():
             print(f"    - {sub}/ : {'OK ✅' if ok else 'MISSING ❌'}")
         print()
-
     elif args.action == "remove":
         StorageManager.remove_config()
         print("🔄 Storage configuration reset to default project directory.")
-
     elif args.action == "move":
         try:
             curr = args.current_path if args.current_path else StorageManager.get_path()
@@ -86,7 +140,7 @@ def handle_storage(args):
 
 
 def handle_vfs(args):
-    """Routes VFS management commands to VFSServiceManager."""
+    """Routes VFS management commands."""
     if args.action == "mount":
         target_path = getattr(args, "storage_path", None) or getattr(args, "target", None)
         samba_flag = getattr(args, "samba", False)
@@ -102,22 +156,33 @@ def main():
     parser = argparse.ArgumentParser(description="NeuraFS Neural Media Storage CLI")
     subparsers = parser.add_subparsers(dest="command", help="Available commands")
 
-    # Init command
+    # Init
     init_parser = subparsers.add_parser("init", help="Zero-touch initialization of NeuraFS storage and config")
-    init_parser.add_argument("--path", type=str, default=None, help="Optional custom physical storage path")
+    init_parser.add_argument("--path", type=str, default=None)
 
-    # Encode command
+    # Service Subcommand
+    service_parser = subparsers.add_parser("service", help="Manage background NeuraFS ecosystem services")
+    service_subparsers = service_parser.add_subparsers(dest="action", required=True)
+    service_subparsers.add_parser("start", help="Start VFS, API, Web UI, and Samba ecosystem")
+    service_subparsers.add_parser("stop", help="Stop all background services")
+    service_subparsers.add_parser("status", help="Show status of all ecosystem services")
+    
+    # Simplified Autostart Subcommand
+    autostart_parser = service_subparsers.add_parser("autostart", help="Manage OS boot persistence (on/off/status)")
+    autostart_parser.add_argument("state", choices=["on", "off", "status"], help="Enable (on), disable (off), or check (status) boot persistence")
+
+    # Encode
     encode_parser = subparsers.add_parser("encode", help="Encode media file to .hcs container")
     encode_parser.add_argument("input", help="Path to input audio file")
     encode_parser.add_argument("output", help="Path to output .hcs container")
     encode_parser.add_argument("--precision", choices=["fp16", "fp32"], default="fp16")
 
-    # Decode command
+    # Decode
     decode_parser = subparsers.add_parser("decode", help="Decode .hcs container to .wav")
     decode_parser.add_argument("input", help="Path to input .hcs container")
     decode_parser.add_argument("output", help="Path to output .wav file")
 
-    # API Subcommand
+    # API
     api_parser = subparsers.add_parser("api", help="Manage NeuraFS FastAPI server")
     api_subparsers = api_parser.add_subparsers(dest="action", required=True)
     api_start = api_subparsers.add_parser("start", help="Start the API server")
@@ -133,7 +198,7 @@ def main():
     api_restart.add_argument("-d", "--daemon", action="store_true")
     api_subparsers.add_parser("status", help="Check running API server status")
 
-    # Web Subcommand
+    # Web
     web_parser = subparsers.add_parser("web", help="Manage NeuraFS Web UI server")
     web_subparsers = web_parser.add_subparsers(dest="action", required=True)
     web_start = web_subparsers.add_parser("start", help="Start Web UI server")
@@ -145,11 +210,11 @@ def main():
     web_restart.add_argument("-d", "--daemon", action="store_true")
     web_subparsers.add_parser("status", help="Check running Web UI server status")
 
-    # Benchmark Subcommand
+    # Benchmark
     bench_parser = subparsers.add_parser("benchmark", help="Run benchmarks")
     bench_parser.add_argument("--type", choices=["encode", "decode", "full"], default="decode")
 
-    # Storage Subcommand
+    # Storage
     storage_parser = subparsers.add_parser("storage", help="Manage universal storage location")
     storage_subparsers = storage_parser.add_subparsers(dest="action", required=True)
     set_parser = storage_subparsers.add_parser("set", help="Set universal storage path")
@@ -160,11 +225,11 @@ def main():
     move_parser.add_argument("new_path", type=str)
     move_parser.add_argument("current_path", type=str, nargs="?", default=None)
 
-    # Inspect Command
+    # Inspect
     inspect_parser = subparsers.add_parser("inspect", help="Inspect .hcs container metadata")
     inspect_parser.add_argument("input", help="Path to .hcs container")
 
-    # VFS Subcommand
+    # VFS
     vfs_parser = subparsers.add_parser("vfs", help="Manage Persistent Virtual File System (VFS)")
     vfs_subparsers = vfs_parser.add_subparsers(dest="action", required=True)
     mount_parser = vfs_subparsers.add_parser("mount", help="Mount persistent virtual drive")
@@ -176,8 +241,14 @@ def main():
 
     args = parser.parse_args()
 
+    # Ensure background ecosystem auto-recovery before executing user commands
+    if args.command in ["encode", "decode", "inspect", "benchmark"]:
+        ServiceOrchestrator.ensure_services_running()
+
     if args.command == "init":
         handle_init(args)
+    elif args.command == "service":
+        handle_service(args)
     elif args.command == "encode":
         res = NeuraFSSDK.encode_file(args.input, args.output, precision=args.precision)
         print(f"[Success] Encoded container saved to: {res['output_path']}")
