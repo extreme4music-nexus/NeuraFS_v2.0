@@ -93,7 +93,8 @@ class ServiceOrchestrator:
         # 3. Start Express.js Web Dashboard (Background Daemon)
         print("[3/4] Launching Express Web Explorer Dashboard (Port 3000)...")
         try:
-            start_web(port=3000, daemon=True)
+            start_web(host="127.0.0.1", port=3000, daemon=True)
+            time.sleep(1)
             results["web"] = "RUNNING ✅ (Port 3000)"
         except Exception as err:
             results["web"] = f"FAILED ❌ ({err})"
@@ -200,15 +201,15 @@ class ServiceOrchestrator:
     def status_all(cls) -> None:
         """Prints aggregated status report across all background services."""
         print("\n===================================================")
-        print("        NeuraFS Global Ecosystem Status            ")
-        print("===================================================")
+        print("        NeuraFS Global Ecosystem Status              ")
+        print("=====================================================")
 
         # Check VFS
         vfs_mounted = VFSServiceManager.is_mounted()
         print(f" • VFS Partition   : {'MOUNTED ✅' if vfs_mounted else 'UNMOUNTED ❌'}")
 
         # Check API Status
-        print(" • API Gateway     : ", end="")
+        print(" • Api Gateway   : ", end="")
         try:
             status_api()
         except Exception:

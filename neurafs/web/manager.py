@@ -58,7 +58,7 @@ class WebManager:
                 pass
 
 
-def start_web(port: int = 3000, daemon: bool = False) -> None:
+def start_web(host: str = "127.0.0.1", port: int = 3000, daemon: bool = False) -> None:
     """Starts the Node.js Web UI server."""
     active_pid = WebManager.get_running_pid()
     if active_pid:
@@ -70,6 +70,7 @@ def start_web(port: int = 3000, daemon: bool = False) -> None:
         return
 
     env = os.environ.copy()
+    env["HOST"] = host
     env["PORT"] = str(port)
 
     cmd = ["node", APP_JS]
@@ -85,9 +86,9 @@ def start_web(port: int = 3000, daemon: bool = False) -> None:
             creationflags=creation_flags,
         )
         WebManager.write_pid(proc.pid)
-        print(f"[NeuraFS Web] Background server launched on http://localhost:{port} (PID: {proc.pid})")
+        print(f"[NeuraFS Web] Background server launched on http://{host}:{port} (PID: {proc.pid})")
     else:
-        print(f"[NeuraFS Web] Starting server on http://localhost:{port}...")
+        print(f"[NeuraFS Web] Starting server on http://{host}:{port}...")
         try:
             proc = subprocess.Popen(cmd, cwd=WEB_DIR, env=env)
             WebManager.write_pid(proc.pid)

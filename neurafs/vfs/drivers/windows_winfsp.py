@@ -9,6 +9,7 @@ from typing import Dict, Any, List
 
 from neurafs.vfs.ram_streamer import RAMStreamBuffer
 from neurafs.core.container import HCSContainer
+from neurafs.vfs.interface import NeuraFSVFSInterface
 
 
 def _load_native_winfsp_dll() -> ctypes.CDLL:
@@ -35,6 +36,7 @@ class NeuraFSWinFSP:
     def __init__(self, storage_root: str):
         self.storage_root = os.path.abspath(storage_root)
         os.makedirs(self.storage_root, exist_ok=True)
+        self.vfs = NeuraFSVFSInterface(self.storage_root)
 
     def get_file_info(self, path: str) -> Dict[str, Any]:
         """Translates FileAttributes and FileSize for Windows Explorer queries (RW mode)."""
@@ -149,6 +151,7 @@ class NeuraFSWinFSP:
     def delete(self, path: str) -> None:
         """Deletes file or directory from storage."""
         rel_path = path.lstrip("\\")
+        success = self.vfs.delete(rel_path)
         full_path = os.path.join(self.storage_root, rel_path)
         if os.path.isdir(full_path):
             os.rmdir(full_path)

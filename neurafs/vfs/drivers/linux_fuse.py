@@ -34,11 +34,12 @@ class NeuraFSFUSE(Operations):
 
         try:
             attr = self.vfs.getattr(path)
+            mode = 0o040777 if attr["is_dir"] else 0o100666
             return {
-                "st_mode": (0o100666),  # Regular file, rw-rw-rw- (RW)
-                "st_nlink": 1,
-                "st_size": attr.size,
-                "st_blocks": (attr.size + 511) // 512,
+                "st_mode": mode,
+                "st_nlink": 2 if attr["is_dir"] else 1,
+                "st_size": attr["size"],
+                "st_blocks": (attr["size"] + 511) // 512,
             }
         except FileNotFoundError:
             raise FuseOSError(errno.ENOENT)
@@ -82,18 +83,20 @@ class NeuraFSFUSE(Operations):
         return len(data)
 
     def unlink(self, path: str) -> None:
-        full_path = os.path.join(self.storage_root, path.lstrip("/"))
-        if os.path.exists(full_path):
-            os.remove(full_path)
+        """Intercepts Linux file deletion / CUT operations."""
+        success = self.vfs.delete(path)
+        if not success:
+            raise FuseOSError(errno.ENOENT)
 
     def mkdir(self, path: str, mode: int) -> None:
         full_path = os.path.join(self.storage_root, path.lstrip("/"))
         os.makedirs(full_path, exist_ok=True)
 
     def rmdir(self, path: str) -> None:
-        full_path = os.path.join(self.storage_root, path.lstrip("/"))
-        if os.path.exists(full_path):
-            os.rmdir(full_path)
+        """Intercepts Linux folder deletion."""
+        success = self.vfs.delete(path)
+        if not success:
+            raise FuseOSError(errno.ENOENT)
 
 
 def mount_linux_fuse(storage_dir: str, mount_point: str) -> None:

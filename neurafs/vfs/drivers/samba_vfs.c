@@ -16,11 +16,14 @@ static int vfs_neurafs_connect(vfs_handle_struct *handle, const char *service, c
  */
 static int vfs_neurafs_stat(vfs_handle_struct *handle, smb_filename *smb_fname) {
     if (strstr(smb_fname->base_name, ".hcs")) {
-        // Intercept stat and query NeuraFS inspection parser
         DEBUG(10, ("NeuraFS VFS: Intercepting stat for %s\n", smb_fname->base_name));
-        smb_fname->st.st_ex_size = 10485760; // Standard virtual baseline size (e.g., 10MB)
-        smb_fname->st.st_ex_mode = S_IFREG | 0444;
-        return 0;
+        
+        // Remove 10MB hardcode. Allow pass-through for now, just mask the file mode.
+        int ret = SMB_VFS_NEXT_STAT(handle, smb_fname);
+        if (ret == 0) {
+            smb_fname->st.st_ex_mode = S_IFREG | 0666;
+        }
+        return ret;
     }
     return SMB_VFS_NEXT_STAT(handle, smb_fname);
 }

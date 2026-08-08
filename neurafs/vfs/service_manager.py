@@ -205,14 +205,20 @@ class VFSServiceManager:
         # Launch detached background process so it survives terminal exit
         CREATE_NEW_PROCESS_GROUP = 0x00000200
         DETACHED_PROCESS = 0x00000008
-        subprocess.Popen(
+        proc = subprocess.Popen(
             [python_exe, driver_script, physical_storage, drive_letter],
             creationflags=DETACHED_PROCESS | CREATE_NEW_PROCESS_GROUP,
             close_fds=True
         )
+        
+        # Track VFS process PID for clean unmounting
+        pid_file = Path.home() / ".neurafs" / "run" / "vfs.pid"
+        pid_file.parent.mkdir(parents=True, exist_ok=True)
+        pid_file.write_text(str(proc.pid), encoding="utf-8")
 
     @staticmethod
     def _umount_windows(drive_letter: str) -> None:
+        VFSServiceManager._kill_vfs_process()
         cmd = ["subst", drive_letter, "/d"] if len(drive_letter) == 2 else ["net", "use", drive_letter, "/delete", "/y"]
         subprocess.run(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
     
@@ -220,11 +226,36 @@ class VFSServiceManager:
     def _mount_linux(physical_storage: str, mount_point: str) -> None:
         python_exe = sys.executable
         driver_script = os.path.join(os.path.dirname(__file__), "drivers", "linux_fuse.py")
-        subprocess.Popen([python_exe, driver_script, physical_storage, mount_point])
+        proc = subprocess.Popen([python_exe, driver_script, physical_storage, mount_point])
+        
+        # Track Linux FUSE process PID
+        pid_file = Path.home() / ".neurafs" / "run" / "vfs.pid"
+        pid_file.parent.mkdir(parents=True, exist_ok=True)
+        pid_file.write_text(str(proc.pid), encoding="utf-8")
 
     @staticmethod
     def _umount_linux(mount_point: str) -> None:
+        VFSServiceManager._kill_vfs_process()
         subprocess.run(["fusermount", "-u", mount_point], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        
+    @staticmethod
+    def _kill_vfs_process() -> None:
+        """Terminates active VFS background daemon process via tracked PID."""
+        pid_file = Path.home() / ".neurafs" / "run" / "vfs.pid"
+        if pid_file.exists():
+            try:
+                pid = int(pid_file.read_text().strip())
+                if sys.platform == "win32":
+                    subprocess.run(["taskkill", "/F", "/PID", str(pid)], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+                else:
+                    import signal
+                    os.kill(pid, signal.SIGTERM)
+            except Exception:
+                pass
+            try:
+                os.remove(pid_file)
+            except OSError:
+                pass
     
     @staticmethod
     def _register_windows_autostart(physical_storage: str, drive_letter: str) -> None:

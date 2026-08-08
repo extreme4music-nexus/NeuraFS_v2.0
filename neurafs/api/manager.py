@@ -44,7 +44,7 @@ class APIManager:
         """Returns PID file path inside central ~/.neurafs/run/ directory."""
         run_dir = Path.home() / ".neurafs" / "run"
         run_dir.mkdir(parents=True, exist_ok=True)
-        return run_dir / "neurafs_web.pid"
+        return run_dir / "neurafs_api.pid"
 
     @classmethod
     def clear_pid(cls) -> None:

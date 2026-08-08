@@ -140,23 +140,39 @@ class QueueManager:
         ActivityLogger.log("PROCESSING", f"Started conversion: {file_name}")
 
         try:
+            temp_hcs = f"{file_path}.tmp"
             output_hcs = f"{file_path}.hcs"
             if is_audio:
                 # FastAPI / SDK Neural Encoding
-                NeuraFSSDK.encode_file(file_path, output_hcs)
+                NeuraFSSDK.encode_file(file_path, temp_hcs)
             else:
                 # Fast LZMA Compression for general data files
                 cls._lzma_pack(file_path, output_hcs)
+
+            # Move completed temp file to final .hcs container
+            if os.path.exists(temp_hcs):
+                os.replace(temp_hcs, output_hcs)
+
+            # Unlock and clean up original physical file to finalize VFS illusion
+            cls._set_readonly(file_path, False)
+            if os.path.exists(file_path):
+                os.remove(file_path)
 
             StateManager.update_status(file_path, status="COMPLETED_HCS", hcs_path=output_hcs)
             ActivityLogger.log("COMPLETED", f"Successfully converted to container: {os.path.basename(output_hcs)}")
 
         except Exception as err:
+            # Clean up temp file if encoding failed
+            if os.path.exists(temp_hcs):
+                try:
+                    os.remove(temp_hcs)
+                except OSError:
+                    pass
             StateManager.update_status(file_path, status="ERROR")
             ActivityLogger.log("ERROR", f"Conversion failed for {file_name}: {err}")
 
         finally:
-            # Unlock file and remove job
+            # Ensure lock removal and cleanup queue
             cls._set_readonly(file_path, False)
             with cls._lock:
                 cls._queue.pop(file_path, None)

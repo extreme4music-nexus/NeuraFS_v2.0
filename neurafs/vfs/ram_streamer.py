@@ -1,6 +1,7 @@
 """NeuraFS Zero-Latency Prioritized Chunk-0 RAM Streamer."""
 
 import io
+import lzma
 import torch
 import numpy as np
 from typing import Generator, Dict, Any, List, Tuple
@@ -43,6 +44,10 @@ class RAMStreamBuffer:
             self.chunks_map.setdefault(c_idx, []).append(unit)
 
         self.total_chunks = len(self.chunks_map)
+        
+        # Нов интелигентен LRU кеш за брзо премотување (чува последни 3 чанка)
+        self.chunk_cache = OrderedDict()
+        self.cache_limit = 3
 
     def _resynchronize_single_chunk(self, chunk_idx: int) -> np.ndarray:
         """Evaluates SIREN neural subband agents for a single 2.5s temporal chunk in RAM."""
@@ -87,6 +92,75 @@ class RAMStreamBuffer:
         """Priority 1: Immediately resynthesizes Chunk 0 for 0ms playback start."""
         chunk_0_pcm = self._resynchronize_single_chunk(chunk_idx=0)
         return chunk_0_pcm, self.target_sample_rate
+        
+    def _generate_wav_header(self) -> bytes:
+        """Generates a dynamic 44-byte valid RIFF/WAV header on the fly."""
+        import struct
+        total_samples = self.orig_info.get("samples", 0)
+        bytes_per_sample = 2  # 16-bit PCM
+        pcm_data_size = total_samples * self.channels * bytes_per_sample
+        file_size = pcm_data_size + 36
+        
+        header = struct.pack(
+            '<4sI4s4sIHHIIHH4sI',
+            b'RIFF', file_size, b'WAVE',
+            b'fmt ', 16, 1, self.channels, self.target_sample_rate,
+            self.target_sample_rate * self.channels * bytes_per_sample,
+            self.channels * bytes_per_sample, bytes_per_sample * 8,
+            b'data', pcm_data_size
+        )
+        return header
+
+    def read_pcm_bytes(self, offset: int, length: int) -> bytes:
+        """Handles byte-exact random-access read requests from the OS kernel."""
+        wav_header = self._generate_wav_header()
+        
+        # Сценарио 1: Оперативниот систем го чита WAV заглавието (првите 44 бајти)
+        if offset < 44:
+            header_slice = wav_header[offset : offset + length]
+            if len(header_slice) == length:
+                return header_slice
+            # Ако бара повеќе податоци одеднаш, го адаптираме офсетот за понатаму
+            offset = 44
+            length -= len(header_slice)
+            result = bytearray(header_slice)
+        else:
+            result = bytearray()
+            
+        # Сценарио 2: Читање на аудио бајти (пресметка кој чанк ни треба)
+        adjusted_offset = offset - 44
+        bytes_per_sample = 2
+        chunk_samples = int(self.target_sample_rate * config.CHUNK_DURATION_SEC)
+        chunk_bytes = chunk_samples * self.channels * bytes_per_sample
+        
+        start_chunk = adjusted_offset // chunk_bytes
+        end_chunk = (adjusted_offset + length) // chunk_bytes
+        
+        for c_idx in range(start_chunk, end_chunk + 1):
+            if c_idx >= self.total_chunks:
+                break
+                
+            # Провери дали веќе сме го декодирале овој чанк неодамна (RAM Кеш)
+            if c_idx in self.chunk_cache:
+                chunk_pcm_bytes = self.chunk_cache[c_idx]
+                self.chunk_cache.move_to_end(c_idx)  # Освежи го во кешот
+            else:
+                # Декодирај го чанкот само ако мора
+                pcm_float = self._resynchronize_single_chunk(c_idx)
+                chunk_pcm_bytes = (np.clip(pcm_float, -1.0, 1.0) * 32767.0).astype(np.int16).T.tobytes()
+                
+                self.chunk_cache[c_idx] = chunk_pcm_bytes
+                if len(self.chunk_cache) > self.cache_limit:
+                    self.chunk_cache.popitem(last=False)
+                    
+            # Прецизно сечење на потребните бајти од чанкот
+            chunk_start_pos = c_idx * chunk_bytes
+            local_offset = max(0, adjusted_offset - chunk_start_pos)
+            bytes_to_take = min(len(chunk_pcm_bytes) - local_offset, length - len(result))
+            
+            result.extend(chunk_pcm_bytes[local_offset : local_offset + bytes_to_take])
+            
+        return bytes(result)
 
     def generate_pcm_stream(self) -> Generator[bytes, None, None]:
         """Yields continuous Int16 PCM byte buffers chunk-by-chunk directly from RAM."""
@@ -112,3 +186,23 @@ class RAMStreamBuffer:
             # Convert Float32 [-1.0, 1.0] to Int16 PCM bytes for audio output
             audio_int16 = (np.clip(pcm_out, -1.0, 1.0) * 32767.0).astype(np.int16)
             yield audio_int16.T.tobytes()
+
+class DataStreamBuffer:
+    """Handles transparent on-the-fly LZMA decompression for non-media data files in RAM."""
+
+    def __init__(self, hcs_bytes: bytes):
+        self.hcs_bytes = hcs_bytes
+        self._decompressed_data: Optional[bytes] = None
+
+    def _decompress_all() -> bytes:
+        if self._decompressed_data is None:
+            try:
+                self._decompressed_data = lzma.decompress(self.hcs_bytes)
+            except Exception:
+                self._decompressed_data = b""
+        return self._decompressed_data
+
+    def read_bytes(self, offset: int, length: int) -> bytes:
+        """Serves byte-exact offset reads from decompressed RAM buffer."""
+        data = self._decompress_all()
+        return data[offset : offset + length]

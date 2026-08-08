@@ -3,9 +3,11 @@
 import os
 from typing import Dict, Any, List
 
+from neurafs.vfs.virtual_layer import VFSVirtualLayer
+from neurafs.vfs.ram_streamer import RAMStreamBuffer, DataStreamBuffer
 from neurafs.core.container import HCSContainer
-from neurafs.vfs.inspect import VFSMetadataInspector, VirtualFileAttributes
-from neurafs.vfs.ram_streamer import RAMStreamBuffer
+from neurafs.core.modules.state_db import StateManager
+from neurafs.core.modules.activity_logger import ActivityLogger
 
 
 class NeuraFSVFSInterface:
@@ -15,48 +17,77 @@ class NeuraFSVFSInterface:
         self.root_storage_dir = os.path.abspath(root_storage_dir)
         self.active_buffers: Dict[str, RAMStreamBuffer] = {}
 
-    def getattr(self, virtual_path: str) -> VirtualFileAttributes:
-        """Returns virtual file attributes for kernel filesystem requests."""
-        hcs_path = self._resolve_hcs_path(virtual_path)
-        return VFSMetadataInspector.inspect_file(hcs_path)
+    def getattr(self, virtual_path: str) -> Dict[str, Any]:
+        """Returns spoofed virtual file attributes for kernel filesystem requests."""
+        attr = VFSVirtualLayer.get_virtual_attributes(self.root_storage_dir, virtual_path)
+        if not attr:
+            raise FileNotFoundError(f"Virtual path missing: {virtual_path}")
+        return attr
 
-    def readdir(self, virtual_dir_path: str) -> List[VirtualFileAttributes]:
-        """Lists virtual uncompressed files inside target directory."""
+    def readdir(self, virtual_dir_path: str) -> List[Dict[str, Any]]:
+        """Lists virtualized uncompressed files inside target directory."""
         target_dir = os.path.join(self.root_storage_dir, virtual_dir_path.lstrip("/\\"))
-        if not os.path.exists(target_dir):
-            raise FileNotFoundError(f"Virtual directory missing: {virtual_dir_path}")
-
-        virtual_files = []
-        for entry in os.listdir(target_dir):
-            if entry.endswith(".hcs"):
-                hcs_full = os.path.join(target_dir, entry)
-                attrs = VFSMetadataInspector.inspect_file(hcs_full)
-                virtual_files.append(attrs)
-
-        return virtual_files
+        return VFSVirtualLayer.resolve_virtual_listing(target_dir)
 
     def read(self, virtual_path: str, offset: int, length: int) -> bytes:
-        """Handles byte-offset read requests directly from RAM stream buffers."""
-        hcs_path = self._resolve_hcs_path(virtual_path)
+        """Handles byte-offset read requests directly from RAM stream buffers or raw files."""
+        clean_rel = virtual_path.lstrip("/\\")
+        phys_direct = os.path.join(self.root_storage_dir, clean_rel)
+        phys_hcs = f"{phys_direct}.hcs"
 
-        if hcs_path not in self.active_buffers:
-            with open(hcs_path, "rb") as f:
-                compressed_bytes = f.read()
-            manifest, raw_blobs_data = HCSContainer.unpack(compressed_bytes)
-            self.active_buffers[hcs_path] = RAMStreamBuffer(manifest, raw_blobs_data)
+        # Scenario A: File is COMPLETED_HCS (.hcs container)
+        if os.path.exists(phys_hcs):
+            if phys_hcs not in self.active_buffers:
+                with open(phys_hcs, "rb") as f:
+                    hcs_bytes = f.read()
+                
+                # Автоматска детекција: Невронско аудио или LZMA Податоци
+                try:
+                    self.active_buffers[phys_hcs] = RAMStreamBuffer(hcs_bytes)
+                except Exception:
+                    self.active_buffers[phys_hcs] = DataStreamBuffer(hcs_bytes)
 
-        stream_buffer = self.active_buffers[hcs_path]
-        return stream_buffer.read_pcm_bytes(offset, length)
+            streamer = self.active_buffers[phys_hcs]
+            if isinstance(streamer, RAMStreamBuffer):
+                return streamer.read_pcm_bytes(offset, length)
+            else:
+                return streamer.read_bytes(offset, length)
 
-    def _resolve_hcs_path(self, virtual_path: str) -> str:
-        """Maps virtual path request to physical .hcs container file location."""
-        clean_path = virtual_path.lstrip("/\\")
-        hcs_candidate = os.path.join(self.root_storage_dir, clean_path)
+        # Scenario B: File is in PROCESSING or UNCONVERTED state (Passthrough)
+        if os.path.exists(phys_direct):
+            with open(phys_direct, "rb") as f:
+                f.seek(offset)
+                return f.read(length)
 
-        if not hcs_candidate.endswith(".hcs"):
-            hcs_candidate += ".hcs"
+        return b""
 
-        if not os.path.exists(hcs_candidate):
-            raise FileNotFoundError(f"Virtual path resolution failed: {virtual_path}")
+    def delete(self, virtual_path: str) -> bool:
+        """Intercepts CUT/MOVE/DELETE operations to physically clean .hcs containers and state DB."""
+        clean_rel = virtual_path.lstrip("/\\")
+        phys_direct = os.path.join(self.root_storage_dir, clean_rel)
+        phys_hcs = f"{phys_direct}.hcs"
 
-        return hcs_candidate
+        # Избриши ги активните RAM кешови за фајлот
+        self.active_buffers.pop(phys_hcs, None)
+
+        deleted = False
+        target_path = None
+
+        if os.path.exists(phys_hcs):
+            os.remove(phys_hcs)
+            target_path = phys_direct
+            deleted = True
+        elif os.path.exists(phys_direct):
+            if os.path.isdir(phys_direct):
+                os.rmdir(phys_direct)
+            else:
+                os.remove(phys_direct)
+            target_path = phys_direct
+            deleted = True
+
+        if deleted and target_path:
+            StateManager.update_status(target_path, status="DELETED")
+            ActivityLogger.log("VFS_DELETE", f"Removed item via VFS virtual path: {os.path.basename(virtual_path)}")
+            return True
+
+        return False
