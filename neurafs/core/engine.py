@@ -1,135 +1,56 @@
 """NeuraFS Parallel Encoding Engine & Multi-Agent Orchestrator."""
 
-import os
-import time
-import multiprocessing as mp
-import numpy as np
-import torch
-from typing import Dict, Any, List, Tuple
+from __future__ import annotations
 
-from neurafs.core.config import config, PrecisionMode, DecodeMode
-from neurafs.core.dsp import (
-    AudioLoader,
-    SpectralComplexityAnalyzer,
-    SubbandFilterBank,
-    TemporalChunker,
-)
-from neurafs.core.codecs.siren import SirenAgent, compute_composite_loss
+import time
+from typing import Any, Dict, List, Optional
+
+import numpy as np
+
+from neurafs.core.codecs import get_codec
+from neurafs.core.codecs.siren_codec import _isolated_subband_worker  # noqa: F401  (mp pickling alias)
+from neurafs.core.config import PrecisionMode, config
 from neurafs.core.container import HCSContainer
+from neurafs.core.dsp import AudioLoader
 from neurafs.benchmarks.metrics import compute_metrics
 
 
-def _isolated_subband_worker(args: Dict[str, Any]) -> Dict[str, Any]:
-    """Isolated multi-core worker process executing SIREN training on a specific subband chunk."""
-    subband_pcm = args["pcm"]
-    precision_str = args["precision"]
-    epochs = args["epochs"]
-    channels = subband_pcm.ndim if subband_pcm.ndim == 1 else subband_pcm.shape[0]
-
-    device = torch.device("cpu")  # Isolated CPU worker thread
-    num_samples = subband_pcm.shape[-1]
-
-    # Coordinate domain input [-1.0, 1.0]
-    t_coords = torch.linspace(-1.0, 1.0, steps=num_samples, dtype=torch.float32).unsqueeze(-1).to(device)
-    targets = torch.from_numpy(subband_pcm).T.float().to(device)
-    if targets.ndim == 1:
-        targets = targets.unsqueeze(-1)
-
-    agent = SirenAgent(
-        in_features=1,
-        hidden_features=config.SIREN_HIDDEN_FEATURES,
-        hidden_layers=config.SIREN_HIDDEN_LAYERS,
-        out_features=channels,
-        omega_0=config.SIREN_OMEGA_0,
-    ).to(device)
-
-    optimizer = torch.optim.Adam(agent.parameters(), lr=1e-4)
-
-    # Train SIREN Agent for target dynamic epochs
-    agent.train()
-    for _ in range(epochs):
-        optimizer.zero_grad()
-        output = agent(t_coords)
-        loss = compute_composite_loss(output, targets)
-        loss.backward()
-        optimizer.step()
-
-    precision = PrecisionMode.HIGH_32 if precision_str == "fp32" else PrecisionMode.STANDARD_16
-    serialized_blob = agent.serialize_weights(precision)
-
-    return {
-        "chunk_idx": args["chunk_idx"],
-        "band_idx": args["band_idx"],
-        "blob": serialized_blob,
-        "channels": channels,
-    }
-
-
 class NeuraFSEngine:
-    """Core Orchestrator managing parallel neural media encoding and synthesis."""
+    """Core orchestrator: routes encode/decode through the pluggable codec registry."""
 
     @classmethod
     def encode_media(
-        cls, file_bytes: bytes, filename: str, precision: PrecisionMode = PrecisionMode.STANDARD_16
+        cls,
+        file_bytes: bytes,
+        filename: str,
+        precision: PrecisionMode = PrecisionMode.STANDARD_16,
+        codec: Optional[str] = None,
+        **codec_kwargs: Any,
     ) -> bytes:
-        """Encodes media file into .hcs neural container bytes using parallel worker pool."""
-        start_time = time.time()
-        hw_profile = config.scan_hardware(precision)
+        """Encode media into .hcs neural container bytes using the selected codec.
 
-        # 1. Load Audio PCM
+        Parameters
+        ----------
+        codec :
+            Registry id (`siren`, `dac`, `encodec`). Defaults to config.DEFAULT_CODEC.
+        """
+        start_time = time.time()
+        codec_id = (codec or config.DEFAULT_CODEC).lower().strip()
+        agent = get_codec(codec_id)
+
         pcm_data, sample_rate, channels = AudioLoader.load_from_bytes(file_bytes)
 
-        # 2. Analyze Audio Complexity
-        complexity_metrics = SpectralComplexityAnalyzer.analyze_complexity(pcm_data)
-        complexity_score = complexity_metrics["complexity_score"]
+        payload, chunk_units, neural_meta = agent.encode_media(
+            pcm_data=pcm_data,
+            sample_rate=sample_rate,
+            channels=channels,
+            filename=filename,
+            file_size=len(file_bytes),
+            precision=precision,
+            **codec_kwargs,
+        )
 
-        # 3. Dynamic Hardware & Subband Allocation
-        num_subbands = config.calculate_dynamic_subbands(complexity_score, hw_profile.recommended_workers)
-        dynamic_epochs = config.calculate_dynamic_epochs(complexity_score)
-
-        # 4. Slice Audio into 2.5s Temporal Chunks
-        chunks = TemporalChunker.slice_into_chunks(pcm_data, sample_rate=sample_rate)
-
-        worker_tasks = []
-        chunk_manifest_units = []
-        blob_offset = 0
-
-        # 5. Decompose Each Temporal Chunk into Dynamic Subbands
-        for chunk in chunks:
-            c_idx = chunk["chunk_idx"]
-            subbands, cutoff_pairs = SubbandFilterBank.decompose_subbands(
-                chunk["pcm_data"], num_bands=num_subbands, sample_rate=sample_rate
-            )
-
-            for b_idx, (subband_pcm, cutoffs) in enumerate(zip(subbands, cutoff_pairs)):
-                worker_tasks.append({
-                    "chunk_idx": c_idx,
-                    "band_idx": b_idx,
-                    "pcm": subband_pcm,
-                    "precision": precision.value,
-                    "epochs": dynamic_epochs,
-                })
-
-        # 6. Execute Parallel Multi-Core SIREN Training Pool
-        num_workers = min(hw_profile.recommended_workers, len(worker_tasks))
-        with mp.Pool(processes=num_workers) as pool:
-            results = pool.map(_isolated_subband_worker, worker_tasks)
-
-        # 7. Assemble Binary Payload & Metadata Manifest
-        concatenated_blobs = bytearray()
-        for res in results:
-            blob_bytes = res["blob"]
-            blob_len = len(blob_bytes)
-
-            chunk_manifest_units.append({
-                "time_slice_idx": res["chunk_idx"],
-                "subband_idx": res["band_idx"],
-                "offset": blob_offset,
-                "length": blob_len,
-            })
-
-            concatenated_blobs.extend(blob_bytes)
-            blob_offset += blob_len
+        complexity = neural_meta.pop("complexity", {}) if isinstance(neural_meta, dict) else {}
 
         manifest = {
             "hcs_version": "1.0",
@@ -139,39 +60,37 @@ class NeuraFSEngine:
                 "type": "neural_media",
                 "channels": channels,
                 "sample_rate": sample_rate,
+                "samples": int(pcm_data.shape[-1]),
             },
             "neural": {
-                "architecture": "SIREN",
-                "codec": "siren",
+                **neural_meta,
+                "codec": neural_meta.get("codec", codec_id),
+                "architecture": neural_meta.get("architecture", codec_id.upper()),
                 "precision": precision.value,
-                "hidden_layers": config.SIREN_HIDDEN_LAYERS,
-                "hidden_features": config.SIREN_HIDDEN_FEATURES,
-                "omega_0": config.SIREN_OMEGA_0,
-                "subbands": num_subbands,
-                "epochs": dynamic_epochs,
+                "encode_seconds": round(time.time() - start_time, 3),
             },
-            "metrics": complexity_metrics,
-            "chunks": chunk_manifest_units,
+            "metrics": complexity if isinstance(complexity, dict) else {},
+            "chunks": chunk_units,
         }
 
-        # 8. Pack into .hcs Binary Format
-        hcs_bytes = HCSContainer.pack(manifest, bytes(concatenated_blobs))
+        hcs_bytes = HCSContainer.pack(manifest, payload, precision=precision)
 
-        # 9. Compute Reconstruction Verification Metrics (SI-SDR / LSD)
+        # Optional reconstruction metrics (best-effort; never fail encode)
         try:
+            blob_list = [
+                payload[u["offset"] : u["offset"] + u["length"]] for u in chunk_units
+            ]
             recon_pcm = cls.resynthesize_audio_from_units(
-                chunk_manifest_units,
-                [bytes(concatenated_blobs[u["offset"]:u["offset"] + u["length"]]) for u in chunk_manifest_units],
-                channels,
-                sample_rate,
-                precision,
-                num_subbands=num_subbands,
-                num_chunks=len(chunks),
+                chunk_units=chunk_units,
+                blob_list=blob_list,
+                channels=channels,
+                sample_rate=sample_rate,
+                precision=precision,
+                neural_info=manifest["neural"],
             )
             metrics = compute_metrics(pcm_data, recon_pcm, sample_rate)
             manifest["metrics"].update(metrics)
-            # Repack with computed fidelity metrics
-            hcs_bytes = HCSContainer.pack(manifest, bytes(concatenated_blobs))
+            hcs_bytes = HCSContainer.pack(manifest, payload, precision=precision)
         except Exception:
             pass
 
@@ -185,39 +104,47 @@ class NeuraFSEngine:
         channels: int,
         sample_rate: int,
         precision: PrecisionMode,
-        num_subbands: int,
-        num_chunks: int,
+        num_subbands: Optional[int] = None,
+        num_chunks: Optional[int] = None,
+        neural_info: Optional[Dict[str, Any]] = None,
+        codec: Optional[str] = None,
+        **kwargs: Any,
     ) -> np.ndarray:
-        """Resynthesizes full PCM audio in RAM by evaluating SIREN subband agents in parallel."""
-        device = torch.device("cpu")
-        samples_per_chunk = int(sample_rate * config.CHUNK_DURATION_SEC)
-        t_coords = torch.linspace(-1.0, 1.0, steps=samples_per_chunk, dtype=torch.float32).unsqueeze(-1).to(device)
+        """Resynthesize full PCM by dispatching to the codec recorded in neural_info."""
+        info = dict(neural_info or {})
+        if num_subbands is not None and "subbands" not in info:
+            info["subbands"] = num_subbands
+        if num_chunks is not None:
+            info["num_chunks"] = num_chunks
 
-        reconstructed_chunks = [[] for _ in range(num_chunks)]
+        codec_id = (
+            codec
+            or info.get("codec")
+            or _architecture_to_codec(info.get("architecture"))
+            or config.DEFAULT_CODEC
+        )
+        agent = get_codec(str(codec_id))
+        return agent.decode_media(
+            chunk_units=chunk_units,
+            blob_list=blob_list,
+            channels=channels,
+            sample_rate=sample_rate,
+            neural_info=info,
+            precision=precision,
+            num_chunks=num_chunks or info.get("num_chunks"),
+            **kwargs,
+        )
 
-        for unit, raw_blob in zip(chunk_units, blob_list):
-            c_idx = unit["time_slice_idx"]
-            agent = SirenAgent.deserialize_weights(
-                raw_blob,
-                in_features=1,
-                hidden_features=config.SIREN_HIDDEN_FEATURES,
-                hidden_layers=config.SIREN_HIDDEN_LAYERS,
-                out_features=channels,
-                precision=precision,
-            ).to(device)
 
-            agent.eval()
-            with torch.no_grad():
-                pred_pcm = agent(t_coords).cpu().numpy().T
-
-            reconstructed_chunks[c_idx].append(pred_pcm)
-
-        # Synthesize subbands per temporal chunk
-        synthesized_temporal_chunks = []
-        for band_list in reconstructed_chunks:
-            chunk_pcm = SubbandFilterBank.synthesize_subbands(band_list)
-            synthesized_temporal_chunks.append(chunk_pcm)
-
-        # Stitch temporal chunks using Overlap-Add crossfade
-        full_pcm = TemporalChunker.reconstruct_from_chunks(synthesized_temporal_chunks, sample_rate=sample_rate)
-        return full_pcm
+def _architecture_to_codec(architecture: Optional[str]) -> Optional[str]:
+    if not architecture:
+        return None
+    key = architecture.strip().lower()
+    aliases = {
+        "siren": "siren",
+        "dac": "dac",
+        "encodec": "encodec",
+        "en-codec": "encodec",
+        "futureneuralcodec_v1": "future_codec",
+    }
+    return aliases.get(key, key if key in ("siren", "dac", "encodec", "future_codec") else None)

@@ -24,3 +24,8 @@ neurafs = "neurafs.cli:main"
 [tool.setuptools.packages.find]
 where = ["."]
 include = ["neurafs*"]
+
+[project.optional-dependencies]
+dac = ["descript-audio-codec"]
+encodec = ["encodec"]
+codecs = ["descript-audio-codec", "encodec"]

@@ -2,6 +2,7 @@
 
 import os
 from typing import Dict, Any, Tuple
+import numpy as np
 import scipy.io.wavfile as wavfile
 
 from neurafs.core.config import config, PrecisionMode
@@ -48,11 +49,24 @@ class NeuraFSSDK:
 
         blob_list = [raw_blobs_data[u["offset"]:u["offset"] + u["length"]] for u in chunk_units]
 
+        neural_info = manifest.get("neural", {})
+        num_subbands = neural_info.get("subbands", config.DEFAULT_SUBBANDS)
+        num_chunks = max((u.get("time_slice_idx", 0) for u in chunk_units), default=0) + 1
         pcm_float = NeuraFSEngine.resynthesize_audio_from_units(
-            chunk_units, blob_list, channels, sample_rate, precision
+            chunk_units=chunk_units,
+            blob_list=blob_list,
+            channels=channels,
+            sample_rate=sample_rate,
+            precision=precision,
+            num_subbands=num_subbands,
+            num_chunks=num_chunks,
+            neural_info=neural_info,
         )
 
-        audio_pcm16 = (pcm_float * 32767.0).astype("int16")
+        audio_pcm16 = (np.clip(pcm_float, -1.0, 1.0) * 32767.0).astype("int16")
+        # scipy expects (samples, channels)
+        if audio_pcm16.ndim == 2 and audio_pcm16.shape[0] == channels:
+            audio_pcm16 = audio_pcm16.T
         wavfile.write(output_wav_path, sample_rate, audio_pcm16)
 
         return {
@@ -62,7 +76,7 @@ class NeuraFSSDK:
         }
 
     @staticmethod
-    def encode_file(input_file_path: str, output_container_path: str, precision: str = "fp16") -> Dict[str, Any]:
+    def encode_file(input_file_path: str, output_container_path: str, precision: str = "fp16", codec: str = None) -> Dict[str, Any]:
         """Encodes local audio file into .hcs container."""
         if not os.path.exists(input_file_path):
             raise FileNotFoundError(f"Input file not found: {input_file_path}")
@@ -76,7 +90,8 @@ class NeuraFSSDK:
         hcs_bytes = NeuraFSEngine.encode_media(
             file_bytes=file_bytes,
             filename=filename,
-            precision=prec_mode
+            precision=prec_mode,
+            codec=codec,
         )
 
         with open(output_container_path, "wb") as f:

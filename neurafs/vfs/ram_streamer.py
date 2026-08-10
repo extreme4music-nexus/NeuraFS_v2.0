@@ -4,12 +4,14 @@ import io
 import lzma
 import torch
 import numpy as np
-from typing import Generator, Dict, Any, List, Tuple
+from collections import OrderedDict
+from typing import Generator, Dict, Any, List, Tuple, Optional
 from scipy.signal import resample_poly
 
 from neurafs.core.config import config, DecodeMode, PrecisionMode, TargetQualityTier
 from neurafs.core.container import HCSContainer
 from neurafs.core.codecs.siren import SirenAgent
+from neurafs.core.engine import NeuraFSEngine
 from neurafs.core.dsp import SubbandFilterBank, TemporalChunker
 
 
@@ -50,10 +52,31 @@ class RAMStreamBuffer:
         self.cache_limit = 3
 
     def _resynchronize_single_chunk(self, chunk_idx: int) -> np.ndarray:
-        """Evaluates SIREN neural subband agents for a single 2.5s temporal chunk in RAM."""
+        """Evaluates neural agents for a single 2.5s temporal chunk in RAM."""
         units = self.chunks_map.get(chunk_idx, [])
         if not units:
             return np.zeros((self.channels, int(self.sample_rate * config.CHUNK_DURATION_SEC)), dtype=np.float32)
+
+        codec_id = (self.neural_info.get("codec") or self.neural_info.get("architecture") or "siren")
+        codec_id = str(codec_id).strip().lower()
+        if codec_id not in ("siren",):
+            blob_list = [
+                self.raw_blobs_data[u["offset"] : u["offset"] + u["length"]] for u in units
+            ]
+            chunk_pcm = NeuraFSEngine.resynthesize_audio_from_units(
+                chunk_units=units,
+                blob_list=blob_list,
+                channels=self.channels,
+                sample_rate=self.sample_rate,
+                precision=self.precision,
+                neural_info=self.neural_info,
+                num_chunks=1,
+            )
+            if self.target_sample_rate != self.sample_rate:
+                chunk_pcm = resample_poly(
+                    chunk_pcm, self.target_sample_rate, self.sample_rate, axis=-1
+                ).astype(np.float32)
+            return chunk_pcm
 
         device = torch.device("cpu")
         samples_per_chunk = int(self.sample_rate * config.CHUNK_DURATION_SEC)
@@ -194,7 +217,7 @@ class DataStreamBuffer:
         self.hcs_bytes = hcs_bytes
         self._decompressed_data: Optional[bytes] = None
 
-    def _decompress_all() -> bytes:
+    def _decompress_all(self) -> bytes:
         if self._decompressed_data is None:
             try:
                 self._decompressed_data = lzma.decompress(self.hcs_bytes)

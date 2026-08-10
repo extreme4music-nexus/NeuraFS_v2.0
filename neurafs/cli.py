@@ -208,9 +208,15 @@ def handle_vfs(args):
     elif args.action == "status":
         VFSServiceManager.status()
         
+def handle_list_codecs(args):
+    from neurafs.core.codecs import list_codecs
+    import json
+    print(json.dumps(list_codecs(), indent=2))
+
+
 def handle_encode(args):
     """Routes encoding command to NeuraFSSDK."""
-    res = NeuraFSSDK.encode_file(args.input, args.output, precision=args.precision)
+    res = NeuraFSSDK.encode_file(args.input, args.output, precision=args.precision, codec=getattr(args, "codec", None))
     print(f"[Success] Encoded container saved to: {res['output_path']}")
 
 
@@ -256,10 +262,13 @@ def main():
     autostart_parser.add_argument("state", choices=["on", "off", "status"], help="Enable (on), disable (off), or check (status) boot persistence")
 
     # --- Processing & SDK Commands ---
+    subparsers.add_parser("list-codecs", help="List registered neural codecs and availability")
     encode_parser = subparsers.add_parser("encode", help="Encode media file to .hcs container")
     encode_parser.add_argument("input", help="Path to input audio file")
     encode_parser.add_argument("output", help="Path to output .hcs container")
     encode_parser.add_argument("--precision", choices=["fp16", "fp32"], default="fp16")
+    encode_parser.add_argument("--codec", choices=["siren", "dac", "encodec"], default=None,
+                              help="Neural codec (default: config.DEFAULT_CODEC / siren)")
 
     decode_parser = subparsers.add_parser("decode", help="Decode .hcs container to .wav")
     decode_parser.add_argument("input", help="Path to input .hcs container")
@@ -343,6 +352,7 @@ def main():
         "log": handle_log,
 
         # Processing & SDK Operations
+        "list-codecs": handle_list_codecs,
         "encode": handle_encode,
         "decode": handle_decode,
         "inspect": handle_inspect,

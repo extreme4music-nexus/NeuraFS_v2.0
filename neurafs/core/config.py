@@ -49,6 +49,11 @@ class EngineConfig:
     DEFAULT_SAMPLE_RATE: int = 44100
     CHUNK_DURATION_SEC: float = 2.5
 
+    # Active neural codec id (siren | dac | encodec). SIREN remains a first-class alternative.
+    DEFAULT_CODEC: str = "siren"
+    # Fallback subband count when manifest omits neural.subbands
+    DEFAULT_SUBBANDS: int = 4
+
     # Dynamic Subband Bounds (Adapts to audio complexity & available workers)
     MIN_SUBBANDS: int = 2
     MAX_SUBBANDS: int = 8

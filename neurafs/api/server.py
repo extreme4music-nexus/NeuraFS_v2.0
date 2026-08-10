@@ -1,6 +1,7 @@
 """NeuraFS Asynchronous FastAPI Backend Server & Streaming Gateway."""
 
 import os
+import io
 import base64
 import queue
 import threading
@@ -76,6 +77,7 @@ def process_task_execution(task_id: str) -> None:
             file_bytes=file_bytes,
             filename=filename,
             precision=precision,
+            codec=task_info.get("codec"),
         )
 
         manifest, _ = HCSContainer.unpack(hcs_bytes)
@@ -140,12 +142,20 @@ async def serve_root():
     return "<h1>NeuraFS API Engine v2.0 Active</h1>"
 
 
+@app.get("/api/v1/codecs")
+async def list_available_codecs():
+    """Lists registered neural codecs and optional-dependency availability."""
+    from neurafs.core.codecs import list_codecs
+    return list_codecs()
+
+
 @app.post("/api/v1/encode-neural-media-start", response_model=EncodeStartResponse)
 async def encode_neural_media_start(
     file: UploadFile = File(...),
     task_id: str = Form(...),
     precision_mode: str = Form("fp16"),
     compute_device: str = Form("cpu"),
+    codec: str = Form(None),
 ):
     """Enqueues media file for asynchronous background neural encoding."""
     file_bytes = await file.read()
@@ -160,6 +170,7 @@ async def encode_neural_media_start(
         "filename": file.filename,
         "precision_mode": precision_mode,
         "compute_device": compute_device,
+        "codec": codec,
     }
 
     task_queue.put(task_id)
@@ -257,6 +268,7 @@ async def stream_neural_file(path: str = Query(..., description="Relative path t
                 off, length = unit["offset"], unit["length"]
                 blob_list.append(raw_blobs_data[off : off + length])
 
+            neural_info = manifest.get("neural", {})
             pcm_float = NeuraFSEngine.resynthesize_audio_from_units(
                 chunk_units=chunk_units,
                 blob_list=blob_list,
@@ -265,14 +277,18 @@ async def stream_neural_file(path: str = Query(..., description="Relative path t
                 precision=precision,
                 num_subbands=num_subbands,
                 num_chunks=num_chunks,
+                neural_info=neural_info,
             )
 
             audio_pcm16 = (np.clip(pcm_float, -1.0, 1.0) * 32767.0).astype(np.int16)
+            # scipy expects (samples, channels)
+            if audio_pcm16.ndim == 2 and audio_pcm16.shape[0] == channels:
+                audio_pcm16 = audio_pcm16.T
 
             # Build in-memory WAV file
-            wav_bytes_io = bytearray()
-            wavfile.write(wav_bytes_io, sample_rate, audio_pcm16)
-            return Response(content=bytes(wav_bytes_io), media_type="audio/wav")
+            wav_buf = io.BytesIO()
+            wavfile.write(wav_buf, sample_rate, audio_pcm16)
+            return Response(content=wav_buf.getvalue(), media_type="audio/wav")
 
         elif file_type == "lossless_binary":
             return Response(content=raw_blobs_data, media_type="application/octet-stream")
