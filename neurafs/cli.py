@@ -182,15 +182,88 @@ def handle_vfs(args):
         VFSServiceManager.status()
         
 def handle_list_codecs(args):
+    """Lists all registered neural codecs with detailed availability status."""
     from neurafs.core.codecs import list_codecs
     import json
-    print(json.dumps(list_codecs(), indent=2))
+
+    codecs_info = list_codecs()
+    if getattr(args, "json", False):
+        print(json.dumps(codecs_info, indent=2))
+        return
+
+    print("\n📦 --- NeuraFS Registered Neural Codecs ---")
+    print(f" {'ID':<15} {'Architecture':<22} {'Kind':<18} {'Status':<15}")
+    print(" " + "─" * 72)
+    for codec_id, info in codecs_info.items():
+        status_str = "AVAILABLE ✅" if info["available"] else "UNAVAILABLE ❌"
+        print(f" {codec_id:<15} {info['architecture']:<22} {info['kind']:<18} {status_str:<15}")
+        if not info["available"] and info.get("hint"):
+            print(f"   └─ 💡 {info['hint']}")
+    print()
+
+
+def handle_codec(args):
+    """Routes codec management commands (set, get, list)."""
+    from neurafs.core.codecs import CODEC_REGISTRY, list_codecs
+    from neurafs.core.config import config, EngineConfig
+
+    action = getattr(args, "action", None)
+    if action == "set":
+        target = args.name.lower().strip()
+        if target not in CODEC_REGISTRY:
+            known = ", ".join(sorted(CODEC_REGISTRY.keys()))
+            print(f"❌ Error: Codec '{args.name}' is not registered. Registered codecs: {known}")
+            sys.exit(1)
+
+        codecs_info = list_codecs()
+        info = codecs_info.get(target, {})
+        if not info.get("available", True):
+            print(f"⚠️  Warning: Codec '{target}' is registered but currently unavailable on this system.")
+            if info.get("hint"):
+                print(f"💡 Hint: {info['hint']}")
+
+        new_default = EngineConfig.set_default_codec(target)
+        print(f"✅ Default neural codec successfully set to: '{new_default}' ({info.get('architecture', new_default)}) [{info.get('kind', 'inr_weights')}]")
+
+    elif action == "get":
+        curr = config.DEFAULT_CODEC
+        codecs_info = list_codecs()
+        info = codecs_info.get(curr, {})
+        print(f"📌 Current Default Neural Codec: '{curr}' ({info.get('architecture', curr)}) [{info.get('kind', 'inr_weights')}]")
+
+    elif action == "list":
+        handle_list_codecs(args)
+    else:
+        curr = config.DEFAULT_CODEC
+        codecs_info = list_codecs()
+        info = codecs_info.get(curr, {})
+        print(f"📌 Current Default Neural Codec: '{curr}' ({info.get('architecture', curr)}) [{info.get('kind', 'inr_weights')}]")
 
 
 def handle_encode(args):
-    """Routes encoding command to NeuraFSSDK."""
-    res = NeuraFSSDK.encode_file(args.input, args.output, precision=args.precision, codec=getattr(args, "codec", None))
-    print(f"[Success] Encoded container saved to: {res['output_path']}")
+    """Routes encoding command to NeuraFSSDK with validation of neural codec selection."""
+    from neurafs.core.codecs import CODEC_REGISTRY, list_codecs
+    from neurafs.core.config import config
+
+    selected_codec = getattr(args, "codec", None) or config.DEFAULT_CODEC
+    codec_key = selected_codec.lower().strip()
+
+    if codec_key not in CODEC_REGISTRY:
+        known = ", ".join(sorted(CODEC_REGISTRY.keys()))
+        print(f"❌ Error: Codec '{selected_codec}' is not registered. Registered codecs: {known}")
+        sys.exit(1)
+
+    codecs_info = list_codecs()
+    info = codecs_info.get(codec_key, {})
+    if not info.get("available", True):
+        print(f"❌ Error: Codec '{selected_codec}' is registered but unavailable on this system.")
+        if info.get("hint"):
+            print(f"💡 Hint: {info['hint']}")
+        sys.exit(1)
+
+    print(f"⚡ Encoding '{args.input}' using codec: '{codec_key}' ({info.get('architecture', codec_key)}) [{info.get('kind', 'inr_weights')}]...")
+    res = NeuraFSSDK.encode_file(args.input, args.output, precision=args.precision, codec=codec_key)
+    print(f"✅ [Success] Encoded container saved to: {res['output_path']}")
 
 
 def handle_decode(args):
@@ -234,14 +307,28 @@ def main():
     autostart_parser = service_subparsers.add_parser("autostart", help="Manage OS boot persistence (on/off/status)")
     autostart_parser.add_argument("state", choices=["on", "off", "status"], help="Enable (on), disable (off), or check (status) boot persistence")
 
+    # --- Codec Subcommand ---
+    codec_parser = subparsers.add_parser("codec", help="Manage neural audio codecs and configure default codec")
+    codec_subparsers = codec_parser.add_subparsers(dest="action", required=True)
+
+    set_codec_parser = codec_subparsers.add_parser("set", help="Set the default neural codec")
+    set_codec_parser.add_argument("name", type=str, help="Codec ID to set as default (e.g. siren, dac, encodec)")
+
+    codec_subparsers.add_parser("get", help="Display current default neural codec")
+
+    list_codec_subparser = codec_subparsers.add_parser("list", help="List registered neural codecs and availability")
+    list_codec_subparser.add_argument("--json", action="store_true", help="Output raw JSON format")
+
     # --- Processing & SDK Commands ---
-    subparsers.add_parser("list-codecs", help="List registered neural codecs and availability")
+    list_codecs_parser = subparsers.add_parser("list-codecs", help="List registered neural codecs and availability")
+    list_codecs_parser.add_argument("--json", action="store_true", help="Output raw JSON format")
+
     encode_parser = subparsers.add_parser("encode", help="Encode media file to .hcs container")
     encode_parser.add_argument("input", help="Path to input audio file")
     encode_parser.add_argument("output", help="Path to output .hcs container")
     encode_parser.add_argument("--precision", choices=["fp16", "fp32"], default="fp16")
-    encode_parser.add_argument("--codec", choices=["siren", "dac", "encodec"], default=None,
-                              help="Neural codec (default: config.DEFAULT_CODEC / siren)")
+    encode_parser.add_argument("--codec", type=str, default=None,
+                              help="Neural codec (e.g., siren, dac, encodec, future_codec). Default: siren")
 
     decode_parser = subparsers.add_parser("decode", help="Decode .hcs container to .wav")
     decode_parser.add_argument("input", help="Path to input .hcs container")
@@ -326,6 +413,7 @@ def main():
 
         # Processing & SDK Operations
         "list-codecs": handle_list_codecs,
+        "codec": handle_codec,
         "encode": handle_encode,
         "decode": handle_decode,
         "inspect": handle_inspect,

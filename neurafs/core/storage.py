@@ -54,8 +54,16 @@ class StorageManager:
         cls.init_structure(abs_path)
         
         cls._ensure_config_dir()
+        data = {}
+        if CONFIG_FILE.exists():
+            try:
+                with open(CONFIG_FILE, "r", encoding="utf-8") as f:
+                    data = json.load(f)
+            except Exception:
+                data = {}
+        data["storage_path"] = abs_path
         with open(CONFIG_FILE, "w", encoding="utf-8") as f:
-            json.dump({"storage_path": abs_path}, f, indent=4)
+            json.dump(data, f, indent=4)
         return abs_path
 
     @classmethod
