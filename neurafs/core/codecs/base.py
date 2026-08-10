@@ -1,0 +1,1 @@
+print("codec base ok")
