@@ -18,38 +18,11 @@ from neurafs.core.modules.queue_manager import QueueManager
 
 
 def handle_init(args):
-    """Executes environment diagnostic and dependency initialization with progress steps."""
-    print("\n🔍 [1/3] Running Environmental & Pre-Flight Diagnostics...")
+    """Interactive init: dependency/codec scan, auto or manual install, then storage setup."""
     result = NeuraFSInitializer.initialize_system(custom_path=args.path)
-    diag = result['diagnostics']
-
-    print("\n📂 [2/3] Verifying Physical Storage & System Directories...")
-    print(f" • Storage Root : {result['storage_path']}")
-    print(f" • Config File  : {result['config_file']}")
-    print(f" • Subfolders   : {', '.join(result['subfolders'])}")
-
-    print("\n🛡️ [3/3] Environmental Dependencies Check...")
-    print(f" • Host OS      : {diag['os']}")
-
-    # VFS Driver Check
-    vfs = diag['vfs_driver']
-    if vfs['installed']:
-        print(f" • VFS Driver   : READY ✅ ({vfs.get('path') or 'Native System Library'})")
-    else:
-        print(" • VFS Driver   : MISSING ⚠️")
-        print(f"   👉 Guidance  : {vfs['guide']}")
-
-    # Samba Check
-    samba = diag['samba']
-    if diag['os'] == "LINUX":
-        print(f" • Samba VFS    : {samba['status_str']}")
-        if not samba['available']:
-            print(f"   👉 Guidance  : {samba['guide']}")
-    else:
-        print(f" • Samba VFS    : {samba['status_str']}")
-
-    print("\n🚀 --- NeuraFS System Environment Ready ---")
-    print("👉 Execute 'neurafs start' to launch background ecosystem services.\n")
+    if result.get("status") != "success":
+        print("Initialization did not complete successfully.")
+        sys.exit(1)
 
 
 def handle_start(args):
