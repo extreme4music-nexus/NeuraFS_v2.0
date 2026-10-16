@@ -51,10 +51,13 @@ manifest = NeuraFSSDK.inspect('output.hcs')
 NeuraFSSDK.encode_file('input.wav', 'output.hcs', precision='fp16')
 # Decode container to WAV
 NeuraFSSDK.decode_to_wav("output.hcs", "decoded.wav")
-4. Express Web Explorer InterfaceBashcd web
-npm install
-npm start
-Access the web dashboard at http://localhost:3000.Project StructurePlaintextNeuraFS/
+4. Express Web Explorer Interface
+Install the Node.js dependencies from the repository root:
+
+PowerShell
+npm install --prefix neurafs
+
+Use "neurafs start" to launch the web dashboard at http://localhost:3000.Project StructurePlaintextNeuraFS/
 ├── pyproject.toml
 ├── setup.py
 ├── docs/                     # System specifications & API guides

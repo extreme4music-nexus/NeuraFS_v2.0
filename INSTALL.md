@@ -35,19 +35,12 @@ Verify installation:
 Bash
 neurafs --help
 3. Web Explorer UI Setup
-Navigate to the web directory:
+Install the Node.js dependencies declared for the NeuraFS package:
 
-Bash
-cd web
-Install Node.js dependencies:
+PowerShell
+npm install --prefix neurafs
 
-Bash
-npm install
-Start the Express Web Explorer server:
-
-Bash
-npm start
-Open http://localhost:3000 in your web browser.
+The "neurafs start" command launches the Express Web Explorer with the other NeuraFS services. Open http://localhost:3000 in your web browser.
 
 4. Native OS Drivers Setup
 Linux FUSE Mounting
