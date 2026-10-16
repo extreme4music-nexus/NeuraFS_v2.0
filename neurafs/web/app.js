@@ -9,6 +9,16 @@ const path = require('path');
 const os = require('os');
 const multer = require('multer');
 
+// Preserve a Windows drive root as "X:" because Node's readdirSync("X:\\")
+// fails for SUBST drives, while readdirSync("X:") and child paths work.
+function normalizeStorageRoot(storagePath) {
+    const resolved = path.resolve(storagePath);
+    if (process.platform === 'win32' && /^[A-Za-z]:\\$/.test(resolved)) {
+        return resolved.slice(0, 2);
+    }
+    return resolved;
+}
+
 // 1. Читање на универзалната патека од ~/.neurafs/config.json
 function getUniversalStorageRoot() {
     const configPath = path.join(os.homedir(), '.neurafs', 'config.json');
@@ -16,7 +26,7 @@ function getUniversalStorageRoot() {
         try {
             const configData = JSON.parse(fs.readFileSync(configPath, 'utf8'));
             if (configData.storage_path) {
-                return path.resolve(configData.storage_path);
+                return normalizeStorageRoot(configData.storage_path);
             }
         } catch (err) {
             console.warn('[NeuraFS Web] Се користи стандардна патека за storage.');

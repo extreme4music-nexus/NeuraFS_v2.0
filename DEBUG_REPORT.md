@@ -132,3 +132,17 @@ A transient Windows integration probe launched the same installed Python WinFSP 
 **Verification:** The focused VFS mount suite passed (`4 passed in 6.42s`) against the Z: source, including the delayed-readiness regression. Built and installed the revised Z: wheel. A full `neurafs start` then mounted X: successfully (RW); the API health endpoint and Web health/dashboard returned HTTP 200. Watcher was already active. Task Scheduler autostart failed with `Access is denied` because this session is not elevated; the service state correctly records `autostart_enabled: false`.
 
 **New issue found during integrated check:** Web `GET /api/fs/tree` returns HTTP 500 with `ENOENT: scandir 'X:\\'` when configured to use the mounted SUBST root, while `/health` and `/` return 200. PowerShell and Python can enumerate X: root, as can Node enumerate its physical backing directory and X:\media, so this is narrowed to Node root enumeration of the SUBST drive. Investigate separately; do not treat the whole Web service as fully functional yet.
+
+
+### Web tree error diagnosis — Node 22 root path normalization for SUBST drives
+
+Reproduced the endpoint error directly on this Windows host: Node `fs.readdirSync("X:\\")` fails with `ENOENT`, although PowerShell and Python list the same drive root. Node `fs.readdirSync("X:")` succeeds, and `path.join("X:", "media")` produces the usable `X:\media` child path. The web app calls `path.resolve(configData.storage_path)`, converting a configured root `X:\` into the form that fails when enumerated. Fix: retain a Windows drive root as `X:` after resolution; verify the actual mounted-drive tree and existing subfolder endpoints.
+
+
+### Fix 15 — normalize mounted Windows drive roots for Node enumeration
+
+**Changed:** The web backend now preserves a configured Windows drive root as `X:` instead of returning the normalized `X:\\` form. Node 22 can enumerate `X:` and join child directories, but returned `ENOENT` enumerating the trailing-slash root of this SUBST drive.
+
+**Verification:** `node --check neurafs/web/app.js` passed. Rebuilt and force-installed a wheel from the Z: project after stopping Web to release its package-file lock, then restarted Web (PID 3324). With X: mounted, HTTP checks returned 200 for Web `/health`, `/`, `/api/fs/tree`, and API `/health`. The tree response listed the existing `documents` and `media` folders and returned `used_bytes: 68652244`.
+
+**Limitations:** The active web process found Express, Multer and lzma-native via the user's existing `C:\Users\tonic\node_modules`; provisioning those npm packages on a clean installation remains open. Task Scheduler persistence is still unregistered due to session privileges.
