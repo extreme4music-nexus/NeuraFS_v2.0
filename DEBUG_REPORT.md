@@ -19,3 +19,7 @@
 The Z: checkout's configured default is DAC. Its 44.1 kHz 8 kbps weights were already present in the local cache, so no download was performed. Temporary DAC encode/decode checks passed for both 0.25-second and 2.5-second 440 Hz mono tones; both outputs had exact source sample counts. The 0.25-second case measured 24.81 dB SI-SDR, 0.001306 MSE, and an 856-byte HCS file versus a 22,094-byte WAV. The 2.5-second case measured 25.71 dB SI-SDR, 0.001288 MSE, and a 1,868-byte HCS file versus a 220,544-byte WAV.
 
 The earlier low-fidelity and expansion measurements are isolated to the optional SIREN codec in this source tree. SIREN remains poor on a 2.5-second tone even at 400 training steps (about -14.85 dB SI-SDR); its long-clip fidelity is still unresolved. The installed product and this source checkout may therefore differ in codec behavior. Do not treat SIREN output as archival-quality based on these tests.
+
+### Safe repository-suite verification
+
+Ran the repository tests excluding only `test_vfs_file_illusion_and_watchdog_immunity`, because that test writes records into the user's global `~/.neurafs/state.db`. Result: `17 passed, 1 deselected` in 166.89 seconds. The three warnings were PyTorch's upstream `torch.nn.utils.weight_norm` deprecation warnings. Mocked service-orchestrator, mount-state, API health, and Samba tests all passed; the DAC end-to-end and channel-layout tests passed.
