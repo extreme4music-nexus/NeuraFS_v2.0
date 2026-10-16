@@ -108,7 +108,7 @@ class VFSServiceManager:
         return os.path.ismount(target)
 
     @classmethod
-    def _wait_for_mount(cls, os_type: str, target: str, timeout: float = 3.0) -> bool:
+    def _wait_for_mount(cls, os_type: str, target: str, timeout: float = 15.0) -> bool:
         deadline = time.monotonic() + timeout
         while True:
             if cls._mount_target_is_visible(os_type, target):

@@ -115,3 +115,20 @@ Compared the source checkout with the newly installed wheel: `neurafs/sdk/node/h
 **Verification:** Built a wheel from the Z: source (`neurafs-2.0.0-py3-none-any.whl`, 149,318 bytes) into a temporary directory and verified it contains `neurafs/web/app.js`, `neurafs/web/public/index.html`, `neurafs/sdk/node/hyper-compress-sdk.js`, `neurafs/package.json`, and `neurafs/package-lock.json` (5/5). Force-installed that wheel. `neurafs web start --daemon` reached ready state (PID 28048). HTTP checks passed: web `/health` 200, `/` 200, `/api/fs/tree` 200; API `/health` 200.
 
 **Limitations:** Node resolved Express/Multer/lzma-native from `C:\Users\tonic\node_modules` on this PC. A clean-host setup still needs to install or locate these npm dependencies deliberately; this fix only ships the missing project JS/manifests. The VFS remains unmounted and is investigated separately.
+
+
+### VFS startup diagnosis — mount readiness timeout is shorter than driver startup
+
+A transient Windows integration probe launched the same installed Python WinFSP driver command used by the VFS manager. The child remained alive, but X: was not visible at t=1, 2, 3, or 4 seconds; it became visible at t=5 and stayed visible through t=12. The probe then terminated its child and removed X: automatically. The manager's `_wait_for_mount()` default timeout is only 3 seconds, after which it kills the process and records an unmounted state. This reproduces and explains the `start` VFS timeout on this PC. Fix: give the driver a conservative startup window and add a regression test simulating delayed readiness.
+
+
+**VFS fix install retry:** The first force-reinstall of the rebuilt wheel was blocked by Windows `WinError 32`: the running Node web process was using files under the installed `neurafs\web` directory. No package replacement completed. Stop the Web service before reinstalling, then restart it after the wheel is applied.
+
+
+### Fix 14 — allow enough time for the Windows VFS driver to mount
+
+**Changed:** Increased the mount readiness wait from 3 seconds to 15 seconds, and added a regression test in which the Windows mount becomes visible after five simulated seconds. This matches the measured startup delay and leaves a safety margin.
+
+**Verification:** The focused VFS mount suite passed (`4 passed in 6.42s`) against the Z: source, including the delayed-readiness regression. Built and installed the revised Z: wheel. A full `neurafs start` then mounted X: successfully (RW); the API health endpoint and Web health/dashboard returned HTTP 200. Watcher was already active. Task Scheduler autostart failed with `Access is denied` because this session is not elevated; the service state correctly records `autostart_enabled: false`.
+
+**New issue found during integrated check:** Web `GET /api/fs/tree` returns HTTP 500 with `ENOENT: scandir 'X:\\'` when configured to use the mounted SUBST root, while `/health` and `/` return 200. PowerShell and Python can enumerate X: root, as can Node enumerate its physical backing directory and X:\media, so this is narrowed to Node root enumeration of the SUBST drive. Investigate separately; do not treat the whole Web service as fully functional yet.

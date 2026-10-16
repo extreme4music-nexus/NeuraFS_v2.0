@@ -6,6 +6,27 @@ from neurafs.vfs import service_manager as module
 from neurafs.vfs.service_manager import VFSServiceManager
 
 
+def test_mount_wait_allows_slow_windows_driver_startup(monkeypatch):
+    elapsed = 0.0
+
+    def monotonic():
+        return elapsed
+
+    def sleep(seconds):
+        nonlocal elapsed
+        elapsed += seconds
+
+    monkeypatch.setattr(module.time, "monotonic", monotonic)
+    monkeypatch.setattr(module.time, "sleep", sleep)
+    monkeypatch.setattr(
+        VFSServiceManager,
+        "_mount_target_is_visible",
+        lambda os_type, target: elapsed >= 5.0,
+    )
+
+    assert VFSServiceManager._wait_for_mount("windows", "X:")
+
+
 def test_windows_mount_failure_is_persisted_as_unmounted(tmp_path, monkeypatch, capsys):
     physical_storage = tmp_path / "physical"
     state_file = tmp_path / "vfs_state.json"
