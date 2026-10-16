@@ -15,7 +15,7 @@ dependencies = [
     "uvicorn",
     "pydantic",
     "psutil",
-	"winfspy",
+    "winfspy; sys_platform == 'win32'",
 ]
 
 [project.scripts]

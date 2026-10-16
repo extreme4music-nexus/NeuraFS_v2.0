@@ -5,8 +5,13 @@ import os
 import shutil
 import ctypes
 import subprocess
-import winreg
 from datetime import datetime
+
+# Windows registry access is only needed by the native Windows installer.
+if sys.platform == "win32":
+    import winreg
+else:
+    winreg = None
 
 NEURAFS_VERSION = "2.3.0"
 PROJECT_ROOT = os.path.dirname(os.path.abspath(__file__))
@@ -55,6 +60,11 @@ def ensure_dependencies():
 
 
 def build_and_install():
+    if sys.platform != "win32":
+        raise RuntimeError(
+            "The custom PyInstaller installer currently supports Windows only. "
+            "Install the Python package with 'python -m pip install .' on this host."
+        )
     print(f"=== NeuraFS v{NEURAFS_VERSION} Installer ===")
 
     if not is_admin():
@@ -146,6 +156,8 @@ def build_and_install():
 
 
 def uninstall():
+    if sys.platform != "win32":
+        raise RuntimeError("The custom NeuraFS uninstaller currently supports Windows only.")
     print(f"=== NeuraFS v{NEURAFS_VERSION} Uninstaller ===")
 
     if not is_admin():

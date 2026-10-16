@@ -33,3 +33,16 @@ Ran the repository tests excluding only `test_vfs_file_illusion_and_watchdog_imm
 ### Prior repairs confirmed in the Z: checkout
 
 Before continuing with the audio and API-manager issues, the Z: branch was checked against the C: repair log. The existing Z: history already contains the same first nine fixes; no duplicate patching was needed: `235022f` installer path independence, `e7fd815` Windows-safe installer output, `ed7f887` API health route, `7af447f` declared web dependencies, `d57d6c9` web readiness/logging, `84ba94e` truthful orchestration status, `14a4b8a` verified VFS mount state, `f6c587d` truthful VFS autostart status, and `1ea2d3b` Samba host guard. The C: copy was not modified.
+
+## Cross-platform roadmap logged
+
+Added `CROSS_PLATFORM_ROADMAP.md` to define the staged Windows/Linux/macOS readiness work, acceptance evidence, and the rule that unverified host-specific behavior must remain labeled unverified. The authoritative working checkout is Z:\Documents\NeuraFS; the C: copy is frozen. First implementation target: make package metadata and setup imports safe for non-Windows hosts. No implementation change is claimed by this roadmap entry.
+
+
+### Cross-platform Step 1 — make package metadata safe for non-Windows hosts
+
+**Changed:** `setup.py` now imports `winreg` only on Windows. The custom PyInstaller install and uninstall commands fail with explicit Windows-only messages when invoked on another OS instead of crashing on a Windows-only API. `pyproject.toml` now installs `winfspy` only on Windows, so Linux and macOS package resolution will not request the Windows VFS binding.
+
+**Verification:** Python 3.12.4 compiled `setup.py` successfully. A Linux-platform simulation imported `setup.py` with no `winreg`, verified the explicit guard on both custom commands, and confirmed the project root remains anchored to the installer file. Parsed `pyproject.toml` and evaluated the `winfspy` environment marker: excluded on Linux and macOS, included on Windows. `git diff --check` passed.
+
+**Limitations:** This was a platform simulation on a Windows host, not an installation on Linux or macOS. It validates only packaging-time import/metadata behavior; it does not establish a complete Linux/macOS installer, runtime dependencies, service startup, or native VFS support. Those remain in the roadmap.
