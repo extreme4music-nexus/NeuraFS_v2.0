@@ -100,3 +100,47 @@ def test_daemon_start_failure_terminates_child_and_clears_pid(monkeypatch, tmp_p
 
     assert process.terminated
     assert not pid_file.exists()
+
+
+def test_api_readiness_rejects_healthy_endpoint_when_spawned_child_exits(monkeypatch, tmp_path):
+    class ExitingProcess(FakeProcess):
+        calls = 0
+
+        def poll(self):
+            self.calls += 1
+            return None if self.calls == 1 else 1
+
+    process = ExitingProcess()
+    log_file = tmp_path / "api.log"
+    monkeypatch.setattr(manager, "_api_endpoint_is_ready", lambda *_args: True)
+    monkeypatch.setattr(manager, "_read_api_log_tail", lambda _path: "address already in use")
+    monkeypatch.setattr(manager.time, "sleep", lambda _seconds: None)
+
+    with pytest.raises(RuntimeError, match="exited while validating readiness") as error:
+        manager._wait_for_api_ready(process, "127.0.0.1", 8000, log_file)
+    assert "address already in use" in str(error.value)
+
+
+def test_untracked_healthy_api_listener_is_recovered_and_not_duplicated(
+    monkeypatch, tmp_path, capsys
+):
+    pid_file = tmp_path / "run" / "neurafs_api.pid"
+    monkeypatch.setattr(Path, "home", lambda: tmp_path)
+    monkeypatch.setattr(APIManager, "get_pid_file", staticmethod(lambda: pid_file))
+    monkeypatch.setattr(manager, "_api_listener_pid", lambda port: 9876 if port == 8000 else None)
+
+    assert APIManager.get_running_pid() == 9876
+    assert pid_file.read_text(encoding="utf-8") == "9876"
+
+    monkeypatch.setattr(manager, "_api_endpoint_is_ready", lambda *_args: True)
+    manager.start_api(port=8000, daemon=True)
+    assert "already running (PID: 9876)" in capsys.readouterr().out
+
+
+def test_unknown_healthy_listener_blocks_duplicate_api_start(monkeypatch):
+    monkeypatch.setattr(APIManager, "get_running_pid", lambda: None)
+    monkeypatch.setattr(manager, "_api_endpoint_is_ready", lambda *_args: True)
+    monkeypatch.setattr(manager, "_api_listener_pid", lambda _port: None)
+
+    with pytest.raises(RuntimeError, match="refusing to launch a duplicate"):
+        manager.start_api(port=8000, daemon=True)

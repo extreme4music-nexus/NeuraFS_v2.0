@@ -37,6 +37,43 @@ def _read_api_log_tail(log_file: Path) -> str:
         return ""
 
 
+def _api_listener_pid(port: int) -> int | None:
+    """Return a NeuraFS API process already listening on the requested port."""
+    try:
+        listeners = psutil.net_connections(kind="inet")
+    except (psutil.AccessDenied, OSError):
+        return None
+
+    for connection in listeners:
+        if (
+            connection.status != psutil.CONN_LISTEN
+            or not connection.laddr
+            or connection.laddr.port != port
+            or connection.pid is None
+        ):
+            continue
+        try:
+            process = psutil.Process(connection.pid)
+            command = " ".join(process.cmdline()).lower()
+        except (psutil.NoSuchProcess, psutil.AccessDenied):
+            continue
+        if "neurafs.api.server" in command or "_run_api_server" in command or (
+            "neurafs.exe" in command and " api start" in command
+        ):
+            return connection.pid
+    return None
+
+
+def _is_api_process(process) -> bool:
+    try:
+        command = " ".join(process.cmdline()).lower()
+    except (psutil.NoSuchProcess, psutil.AccessDenied):
+        return False
+    return "neurafs.api.server" in command or "_run_api_server" in command or (
+        "neurafs.exe" in command and " api start" in command
+    )
+
+
 def _wait_for_api_ready(proc, host: str, port: int, log_file: Path) -> None:
     deadline = time.monotonic() + API_START_TIMEOUT
     while True:
@@ -48,6 +85,16 @@ def _wait_for_api_ready(proc, host: str, port: int, log_file: Path) -> None:
                 message += f":\n{detail}"
             raise RuntimeError(message)
         if _api_endpoint_is_ready(host, port):
+            # A different process may already own the port and answer this
+            # probe. Give the newly spawned child time to report bind errors.
+            time.sleep(0.25)
+            exit_code = proc.poll()
+            if exit_code is not None:
+                detail = _read_api_log_tail(log_file)
+                message = f"API process exited while validating readiness (exit code {exit_code})"
+                if detail:
+                    message += f":\n{detail}"
+                raise RuntimeError(message)
             return
         if time.monotonic() >= deadline:
             raise RuntimeError(f"API health endpoint did not respond within {API_START_TIMEOUT:g} seconds")
@@ -73,19 +120,29 @@ class APIManager:
         """Reads active PID from disk if process is alive."""
         pid_file = cls.get_pid_file()
         if not os.path.exists(pid_file):
-            return None
+            pid = _api_listener_pid(8000)
+            if pid is not None:
+                cls.write_pid(pid)
+            return pid
         try:
             with open(pid_file, "r", encoding="utf-8") as f:
                 pid = int(f.read().strip())
             if psutil.pid_exists(pid):
                 proc = psutil.Process(pid)
-                if proc.is_running() and proc.status() != psutil.STATUS_ZOMBIE:
+                if (
+                    proc.is_running()
+                    and proc.status() != psutil.STATUS_ZOMBIE
+                    and _is_api_process(proc)
+                ):
                     return pid
         except (ValueError, psutil.NoSuchProcess, PermissionError):
             pass
 
         cls.clear_pid()
-        return None
+        pid = _api_listener_pid(8000)
+        if pid is not None:
+            cls.write_pid(pid)
+        return pid
     
     @classmethod
     def write_pid(cls, pid: int) -> None:
@@ -126,6 +183,16 @@ def start_api(
             return
         raise RuntimeError(
             f"API process {active_pid} is tracked but {_health_url(host, port)} is not responding."
+        )
+    if _api_endpoint_is_ready(host, port):
+        listener_pid = _api_listener_pid(port)
+        if listener_pid is not None:
+            APIManager.write_pid(listener_pid)
+            print(f"[NeuraFS API] Server is already running (PID: {listener_pid}).")
+            return
+        raise RuntimeError(
+            f"An API health endpoint is already responding at {_health_url(host, port)}, "
+            "but its listener could not be identified safely; refusing to launch a duplicate."
         )
 
     app_module = "neurafs.api.server:app"
@@ -178,6 +245,9 @@ def stop_api() -> bool:
     """Stops the active NeuraFS API process and its child workers."""
     pid = APIManager.get_running_pid()
     if not pid:
+        if _api_endpoint_is_ready("127.0.0.1", 8000):
+            print("[NeuraFS API] A healthy API is responding but its process could not be identified; leaving it untouched.")
+            return False
         print("[NeuraFS API] No active API server process found.")
         return False
 
@@ -223,6 +293,9 @@ def status_api() -> None:
     """Prints current runtime status of the NeuraFS API server."""
     pid = APIManager.get_running_pid()
     if not pid:
+        if _api_endpoint_is_ready("127.0.0.1", 8000):
+            print("[NeuraFS API Status] Status: RUNNING (healthy endpoint; process not identified)")
+            return
         print("[NeuraFS API Status] Status: STOPPED (No active process)")
         return
 
