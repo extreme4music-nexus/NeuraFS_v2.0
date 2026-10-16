@@ -100,6 +100,24 @@ def test_resynthesis_trims_padding_to_original_sample_count(monkeypatch):
     assert decoded.shape == (2, 11025)
 
 
+def test_short_source_duration_round_trip(tmp_path):
+    """A sub-chunk WAV decodes to the exact number of samples in its manifest."""
+    sample_rate = 44100
+    sample_count = 11025
+    pcm = (0.5 * np.sin(2 * np.pi * 440 * np.arange(sample_count) / sample_rate) * 32767).astype(np.int16)
+    source_path = tmp_path / "short.wav"
+    container_path = tmp_path / "short.hcs"
+    output_path = tmp_path / "short-decoded.wav"
+    wavfile.write(source_path, sample_rate, pcm)
+
+    NeuraFSSDK.encode_file(str(source_path), str(container_path), codec="siren")
+    NeuraFSSDK.decode_to_wav(str(container_path), str(output_path))
+
+    decoded_rate, decoded = wavfile.read(output_path)
+    assert decoded_rate == sample_rate
+    assert decoded.shape[0] == sample_count
+
+
 def test_mono_stereo_channel_preservation():
     """Verifies that mono and stereo audio files retain exact channel layouts during encoding & decoding."""
     sample_rate = 44100
