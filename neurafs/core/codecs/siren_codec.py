@@ -56,6 +56,7 @@ def _isolated_subband_worker(args: Dict[str, Any]) -> Dict[str, Any]:
         "band_idx": args["band_idx"],
         "blob": agent.serialize_weights(precision),
         "channels": channels,
+        "num_samples": num_samples,
     }
 
 
@@ -89,6 +90,7 @@ class SirenCodec(BaseNeuralCodec):
         worker_tasks: List[Dict[str, Any]] = []
         for chunk in chunks:
             c_idx = chunk["chunk_idx"]
+            valid_samples = int(chunk["end_sample"] - chunk["start_sample"])
             subbands, _cutoff_pairs = SubbandFilterBank.decompose_subbands(
                 chunk["pcm_data"], num_bands=num_subbands, sample_rate=sample_rate
             )
@@ -97,7 +99,7 @@ class SirenCodec(BaseNeuralCodec):
                     {
                         "chunk_idx": c_idx,
                         "band_idx": b_idx,
-                        "pcm": subband_pcm,
+                        "pcm": subband_pcm[..., :valid_samples],
                         "precision": precision.value,
                         "epochs": dynamic_epochs,
                     }
@@ -120,6 +122,7 @@ class SirenCodec(BaseNeuralCodec):
                 {
                     "time_slice_idx": res["chunk_idx"],
                     "subband_idx": res["band_idx"],
+                    "num_samples": res["num_samples"],
                     "offset": blob_offset,
                     "length": blob_len,
                 }
@@ -154,11 +157,6 @@ class SirenCodec(BaseNeuralCodec):
     ) -> np.ndarray:
         device = torch.device("cpu")
         samples_per_chunk = int(sample_rate * config.CHUNK_DURATION_SEC)
-        t_coords = (
-            torch.linspace(-1.0, 1.0, steps=samples_per_chunk, dtype=torch.float32)
-            .unsqueeze(-1)
-            .to(device)
-        )
 
         num_chunks = int(
             kwargs.get("num_chunks")
@@ -175,6 +173,13 @@ class SirenCodec(BaseNeuralCodec):
 
         for unit, raw_blob in zip(chunk_units, blob_list):
             c_idx = int(unit["time_slice_idx"])
+            unit_samples = int(unit.get("num_samples") or samples_per_chunk)
+            unit_samples = max(1, min(samples_per_chunk, unit_samples))
+            t_coords = (
+                torch.linspace(-1.0, 1.0, steps=unit_samples, dtype=torch.float32)
+                .unsqueeze(-1)
+                .to(device)
+            )
             agent = SirenAgent.deserialize_weights(
                 raw_blob,
                 in_features=1,
@@ -186,6 +191,11 @@ class SirenCodec(BaseNeuralCodec):
             agent.eval()
             with torch.no_grad():
                 pred_pcm = agent(t_coords).cpu().numpy().T
+            if pred_pcm.shape[-1] < samples_per_chunk:
+                pad_width = samples_per_chunk - pred_pcm.shape[-1]
+                pred_pcm = np.pad(pred_pcm, ((0, 0), (0, pad_width)))
+            else:
+                pred_pcm = pred_pcm[..., :samples_per_chunk]
             if c_idx < len(reconstructed_chunks):
                 reconstructed_chunks[c_idx].append(pred_pcm)
 

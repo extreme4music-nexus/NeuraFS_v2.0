@@ -110,12 +110,13 @@ def test_short_source_duration_round_trip(tmp_path):
     output_path = tmp_path / "short-decoded.wav"
     wavfile.write(source_path, sample_rate, pcm)
 
-    NeuraFSSDK.encode_file(str(source_path), str(container_path), codec="siren")
+    encoded = NeuraFSSDK.encode_file(str(source_path), str(container_path), codec="siren")
     NeuraFSSDK.decode_to_wav(str(container_path), str(output_path))
 
     decoded_rate, decoded = wavfile.read(output_path)
     assert decoded_rate == sample_rate
     assert decoded.shape[0] == sample_count
+    assert encoded["manifest"]["metrics"]["si_sdr_db"] > 0.0
 
 
 def test_mono_stereo_channel_preservation():

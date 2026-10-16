@@ -91,7 +91,7 @@ class EngineConfig:
     MAX_SUBBANDS: int = 8
 
     # Dynamic Training Epoch Bounds (Scales linearly with complexity score 0.0 -> 1.0)
-    MIN_EPOCHS: int = 50
+    MIN_EPOCHS: int = 200
     BASE_EPOCHS: int = 150
     MAX_EPOCHS: int = 400
 
