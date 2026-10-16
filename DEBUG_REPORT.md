@@ -88,3 +88,16 @@ Added `CROSS_PLATFORM_ROADMAP.md` to define the staged Windows/Linux/macOS readi
 **Initialization:** The first `init` attempt failed with `PermissionError` while saving config. After the three orphan WinFSP processes and their V:/W:/X: SUBST mappings were stopped/removed, retrying `init` succeeded: all detected dependencies were ready, storage directories were verified/created, config was saved, and the CLI reported initialization complete. This temporal association does not prove the orphan drivers caused the original write error.
 
 **Still unresolved before startup:** The separate Program Files bundle remains because its uninstaller requires Windows administrator elevation. Its executable is still broken due the missing bundled Python DLL, and the zero-byte System32 `neurafs` path entry still shadows the working Python Scripts command when using bare `neurafs`. Use the explicit Python Scripts executable for subsequent checks until that is resolved.
+
+
+## Windows `start` verification — partial startup and failures
+
+**Command:** Ran the reinstalled Python Scripts CLI `start`; it returned exit code 0.
+
+**Verified running:** FastAPI child PID 25544 listens on `127.0.0.1:8000`; a direct request to `/health` returned HTTP 200 with `{"status":"ok"}`. Watcher child PID 25844 was launched.
+
+**Failed components:** VFS tried target X: and timed out before it became visible; state was correctly saved as `unmounted` with `autostart_enabled: false`. The Web process exited with code 1 because `neurafs/web/app.js` could not resolve `../sdk/node/hyper-compress-sdk`; port 3000 is not listening. Task Scheduler registration was skipped because this session is not elevated.
+
+**Reporting defect:** Despite the returned startup result identifying VFS and Web failures, `handle_start` printed “All NeuraFS background services are active & operational” and returned exit code 0. This contradicts the service orchestrator's partial-failure report.
+
+**Package diagnosis underway:** The failing web require points to a Node SDK JavaScript file present in the source project but apparently omitted from the installed Python wheel. Node dependency resolution from the installed package must also be checked. VFS drive selection will be investigated separately after the web packaging issue.
