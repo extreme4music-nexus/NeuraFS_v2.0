@@ -142,6 +142,12 @@ async def serve_root():
     return "<h1>NeuraFS API Engine v2.0 Active</h1>"
 
 
+@app.get("/health", include_in_schema=False)
+async def health_check():
+    """Returns a lightweight liveness response for service recovery checks."""
+    return {"status": "ok"}
+
+
 @app.get("/api/v1/codecs")
 async def list_available_codecs():
     """Lists registered neural codecs and optional-dependency availability."""
