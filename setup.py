@@ -9,6 +9,7 @@ import winreg
 from datetime import datetime
 
 NEURAFS_VERSION = "2.3.0"
+PROJECT_ROOT = os.path.dirname(os.path.abspath(__file__))
 
 # Safe exclusions (Keeping heavy GUI/dev tools out, leaving core dependencies intact)
 EXCLUDED_MODULES = [
@@ -39,7 +40,7 @@ def run_as_admin():
 
 def ensure_dependencies():
     print(f"[NeuraFS Build] Checking dependencies for NeuraFS v{NEURAFS_VERSION}...")
-    source_dir = os.path.abspath(os.path.dirname(__file__))
+    source_dir = PROJECT_ROOT
     req_file = os.path.join(source_dir, "requirements.txt")
 
     if os.path.exists(req_file):
@@ -62,7 +63,7 @@ def build_and_install():
 
     ensure_dependencies()
 
-    source_dir = os.path.abspath(os.path.dirname(__file__))
+    source_dir = PROJECT_ROOT
     cli_entry = os.path.join(source_dir, "neurafs", "cli.py")
     web_dir = os.path.join(source_dir, "neurafs", "web")
 
@@ -102,7 +103,7 @@ def build_and_install():
         pyinstaller_cmd.extend(["--add-data", f"{web_dir};neurafs/web"])
 
     print("[NeuraFS Build] Compiling NeuraFS binary distribution with unittest bundled...")
-    subprocess.run(pyinstaller_cmd, check=True)
+    subprocess.run(pyinstaller_cmd, check=True, cwd=source_dir)
 
     dist_neurafs_folder = os.path.join(dist_dir, "neurafs")
     if not os.path.exists(dist_neurafs_folder):
@@ -152,7 +153,7 @@ def uninstall():
 
     program_files = os.environ.get("ProgramFiles", r"C:\Program Files")
     install_target = os.path.join(program_files, "NeuraFS")
-    log_file = os.path.abspath("neurafs_uninstall.log")
+    log_file = os.path.join(PROJECT_ROOT, "neurafs_uninstall.log")
 
     log_entries = [
         f"==================================================\n",
@@ -210,7 +211,8 @@ def uninstall():
 
 
 def main():
-    setuptools_cmds = {"egg_info", "bdist_wheel", "build_wheel", "editable_wheel", "dist_info", "sdist", "develop"}
+    os.chdir(PROJECT_ROOT)
+    setuptools_cmds = {"install", "egg_info", "bdist_wheel", "build_wheel", "editable_wheel", "dist_info", "sdist", "develop"}
     if len(sys.argv) > 1 and any(cmd in sys.argv for cmd in setuptools_cmds):
         from setuptools import setup, find_packages
         setup(
