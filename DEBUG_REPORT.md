@@ -46,3 +46,45 @@ Added `CROSS_PLATFORM_ROADMAP.md` to define the staged Windows/Linux/macOS readi
 **Verification:** Python 3.12.4 compiled `setup.py` successfully. A Linux-platform simulation imported `setup.py` with no `winreg`, verified the explicit guard on both custom commands, and confirmed the project root remains anchored to the installer file. Parsed `pyproject.toml` and evaluated the `winfspy` environment marker: excluded on Linux and macOS, included on Windows. `git diff --check` passed.
 
 **Limitations:** This was a platform simulation on a Windows host, not an installation on Linux or macOS. It validates only packaging-time import/metadata behavior; it does not establish a complete Linux/macOS installer, runtime dependencies, service startup, or native VFS support. Those remain in the roadmap.
+
+
+## Windows reinstall and service validation — initial cleanup findings
+
+**Requested sequence:** Stop/unmount all NeuraFS services and virtual partitions, uninstall, reinstall from the Z: project, run `init` and `start`, then verify CLI and services. C: remains frozen.
+
+**Pre-clean findings:** The Python-installed CLI resolves to an editable install from `Z:\Documents\NeuraFS` (metadata version 2.0.0) and `--help` works. The separate `C:\Program Files\NeuraFS\neurafs.exe` fails before CLI startup with `[PYI-ERROR] Failed to load Python DLL ... _internal\python312.dll`; that DLL is absent. PATH also resolves first to a zero-byte `C:\Windows\System32\neurafs`, so bare `neurafs` produces no useful help. The executable at the Python Scripts path is currently the functioning CLI. No NeuraFS API/web listener or NeuraFS-named task was found; the CLI status reported API/web stopped and VFS unmounted.
+
+**Cleanup actions/results:** Ran the Python-installed CLI's global `stop` (exit code 0); it warned that boot-persistence removal requires Administrator rights. Its status claimed unmounted, but `subst` revealed V:, W:, and X: still mapped to `C:\Users\tonic\.neurafs\storage` with no VFS state file. Deleted only these three NeuraFS-targeting mappings; each `subst /d` returned 0, and the subsequent mapping query showed none. No NeuraFS ports were listening afterward. Unrelated Codex Node processes were left running.
+
+**Issue opened:** NeuraFS can leave virtual drive mappings active while its status reports `UNMOUNTED`; the ordinary stop path also cannot unregister system boot persistence without elevation. These findings will be debugged after the requested reinstall/start verification. The broken Program Files bundle and zero-byte PATH entry are also recorded for diagnosis.
+
+**Reinstall safety note:** The project already contains `build/` and untracked `dist/` outputs. The custom PyInstaller installer deletes both after deployment, so it must not be run until those existing artifacts are preserved or the package-only install route is selected.
+
+
+**Elevated uninstall attempt:** The custom Program Files uninstaller was launched with `RunAs` from the project UNC path. It did not produce `neurafs_uninstall.log`, and `C:\Program Files\NeuraFS` remains present. The current session is not Administrator. Windows elevation must be completed by the user; I will continue with the authorized per-user Python uninstall/reinstall and service validation, while clearly leaving the custom bundle uninstall unresolved until elevation is available.
+
+
+**Per-user reinstall attempt:** After `pip uninstall`, pip reports a `neurafs` 2.3.0 distribution, but `pip show -f` says it cannot locate RECORD, `import neurafs` raises `ModuleNotFoundError`, and no Python Scripts `neurafs.exe` exists. Pip also warns about an invalid `~eurafs` distribution. This is a failed/incomplete installation, not a passing reinstall. Repairing the per-user install is required before running `init`/`start`.
+
+
+## Windows reinstall/init/start verification — first run
+
+**Package reinstall:** The per-user Python package was rebuilt from `Z:\Documents\NeuraFS` after the first uninstall/reinstall sequence left incomplete metadata. The repaired install imports from `C:\Users\tonic\AppData\Local\Programs\Python\Python312\Lib\site-packages\neurafs`; metadata reports the repository's pyproject version 2.0.0. The Python Scripts console command exists and its full `--help` output succeeds. Pip continues to warn about the leftover invalid `~eurafs` distribution from the previous installation.
+
+**`init` result:** Ran the installed CLI's `init`. Its dependency scan reported PyTorch, NumPy, SciPy, FastAPI, Uvicorn, Pydantic, psutil, WinFsp bindings, FFmpeg, Node.js, Windows SMB availability, WinFsp and all listed codecs as present. Storage setup then failed with `PermissionError: [Errno 13] Permission denied` while opening `C:\Users\tonic\.neurafs\config.json` for writing. No successful initialization is claimed; `start` has not yet been run.
+
+**Next diagnostic:** Inspect the existing config file and parent-directory ACL/attributes, determine whether the prior installation or user profile permissions are responsible, and retry only after identifying a safe, logged remedy. Do not replace an existing config or change its ACL without review.
+
+
+**Correction after deeper process inspection:** A `Win32_Process` query found three still-running NeuraFS WinFSP driver processes despite the earlier CLI status and simple process-name checks: PID 28220 for X:, PID 29148 for W:, and PID 30036 for V:. Their command lines point to this checkout's `neurafs\vfs\drivers\windows_winfsp.py` and the NeuraFS storage root. This corrects the earlier observation that no NeuraFS-named service process was found; the driver processes were Python-named and escaped that filter. They are being stopped as part of the requested full cleanup.
+
+
+### Windows package and CLI smoke checks
+
+**Install result:** A forced, non-editable wheel reinstall from `Z:\Documents\NeuraFS` completed successfully (`neurafs-2.0.0-py3-none-any.whl`, 136,158 bytes). The imported package is in the Python 3.12 site-packages directory and the Python Scripts CLI was restored. The initial pip operation had left incomplete metadata; the forced wheel build/reinstall repaired that state. A warning about the old `~eurafs` invalid distribution remains.
+
+**CLI verification:** The installed CLI `--help` succeeded. In-process argparse checks passed for all 25 registered top-level commands. Eleven non-mutating operations also completed: global status, codec get/list, list-codecs, API status, web status, service status, watchdog status, VFS status, storage check, and log. Samba behavior was not tested, per the Windows scope; its help parser was included in the 25 help checks.
+
+**Initialization:** The first `init` attempt failed with `PermissionError` while saving config. After the three orphan WinFSP processes and their V:/W:/X: SUBST mappings were stopped/removed, retrying `init` succeeded: all detected dependencies were ready, storage directories were verified/created, config was saved, and the CLI reported initialization complete. This temporal association does not prove the orphan drivers caused the original write error.
+
+**Still unresolved before startup:** The separate Program Files bundle remains because its uninstaller requires Windows administrator elevation. Its executable is still broken due the missing bundled Python DLL, and the zero-byte System32 `neurafs` path entry still shadows the working Python Scripts command when using bare `neurafs`. Use the explicit Python Scripts executable for subsequent checks until that is resolved.
