@@ -35,7 +35,14 @@ def handle_start(args):
     print("[Step 4/5] Launching Express Web Dashboard...")
     print("[Step 5/5] Activating Watchdog Daemon & Queue Workers...")
     
-    ServiceOrchestrator.start_all()
+    results = ServiceOrchestrator.start_all()
+    failed_services = [
+        name for name, status in results.items()
+        if isinstance(status, str) and status.startswith("FAILED")
+    ]
+    if failed_services:
+        print("NeuraFS startup is incomplete; failed services: " + ", ".join(failed_services))
+        sys.exit(1)
     print("✨ All NeuraFS background services are active & operational.\n")
 
 

@@ -158,3 +158,9 @@ Reproduced the endpoint error directly on this Windows host: Node `fs.readdirSyn
 **Final service state:** VFS mounted X: read/write from `C:\\Users\\tonic\\.neurafs\\storage`; API PID 15604 healthy on port 8000; Web PID 27908 running on port 3000; watcher active; Samba unavailable by design on Windows. Global status confirms all four supported services running. Boot persistence remains disabled because Task Scheduler registration returns `Access is denied` in this non-elevated session.
 
 **Outstanding command/environment limits:** Windows Task Scheduler autostart and removal of the Program Files bundle require Administrator elevation and remain incomplete. Native Linux/macOS install/runtime validation remains impossible on this Windows host. Clean-host Node dependency provisioning remains unverified; current Web launch depends on preexisting `C:\\Users\\tonic\\node_modules` packages. The newly discovered API startup race and false-success message are next debugging fixes.
+
+### Fix 16 — make `start` report incomplete startup honestly
+
+**Changed:** `handle_start` now checks the result returned by `ServiceOrchestrator.start_all()`. If any service status begins with `FAILED`, the CLI prints the failed service names, exits with status 1, and does not print the all-operational claim.
+
+**Verification:** Focused `test_service_orchestrator.py` passed (2 passed). This directly covers the previously observed case where API startup failed but `neurafs start` still printed “All NeuraFS background services are active & operational.” The fixed source still needs to be installed and exercised through the real CLI before considering the fix complete.

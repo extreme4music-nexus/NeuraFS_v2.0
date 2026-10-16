@@ -1,5 +1,25 @@
 from neurafs.core import service_orchestrator as module
 from neurafs.core.service_orchestrator import ServiceOrchestrator
+from neurafs import cli
+
+
+def test_cli_start_does_not_claim_success_when_a_service_failed(monkeypatch, capsys):
+    monkeypatch.setattr(
+        cli.ServiceOrchestrator,
+        "start_all",
+        lambda: {"api": "FAILED ❌ (did not start)", "autostart": "NOT REGISTERED"},
+    )
+
+    try:
+        cli.handle_start(None)
+    except SystemExit as exc:
+        assert exc.code == 1
+    else:
+        raise AssertionError("start must return a failure exit code when a service failed")
+
+    output = capsys.readouterr().out
+    assert "startup is incomplete" in output
+    assert "All NeuraFS background services are active" not in output
 
 
 def test_start_reports_service_and_autostart_failures(monkeypatch, capsys):
