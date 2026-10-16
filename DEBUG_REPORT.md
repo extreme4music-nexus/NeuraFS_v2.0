@@ -13,3 +13,9 @@
 **Verification:** Added an epoch-floor unit test and strengthened the actual 0.25-second SIREN round-trip test to require exact duration and positive SI-SDR. Both passed (`2 passed in 22.20s`); Python compilation and `git diff --check` passed. Controlled tests on the same 440 Hz mono input measured SI-SDR/MSE of `20.36 dB / 0.001151` at 200 iterations and `21.45 dB / 0.000932` at 400, compared with `-41.64 dB / 0.125359` at the old 53-iteration padded baseline.
 
 **Tradeoff / remaining issue:** The minimum training floor increases encode time for low-complexity signals. The 0.25-second SIREN container remains about 45 KB versus a 22 KB WAV, so short-file compression overhead is still unresolved.
+
+### Follow-up codec validation — current configured default
+
+The Z: checkout's configured default is DAC. Its 44.1 kHz 8 kbps weights were already present in the local cache, so no download was performed. Temporary DAC encode/decode checks passed for both 0.25-second and 2.5-second 440 Hz mono tones; both outputs had exact source sample counts. The 0.25-second case measured 24.81 dB SI-SDR, 0.001306 MSE, and an 856-byte HCS file versus a 22,094-byte WAV. The 2.5-second case measured 25.71 dB SI-SDR, 0.001288 MSE, and a 1,868-byte HCS file versus a 220,544-byte WAV.
+
+The earlier low-fidelity and expansion measurements are isolated to the optional SIREN codec in this source tree. SIREN remains poor on a 2.5-second tone even at 400 training steps (about -14.85 dB SI-SDR); its long-clip fidelity is still unresolved. The installed product and this source checkout may therefore differ in codec behavior. Do not treat SIREN output as archival-quality based on these tests.
