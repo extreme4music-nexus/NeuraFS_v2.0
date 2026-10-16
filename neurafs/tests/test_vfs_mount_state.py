@@ -22,7 +22,7 @@ def test_windows_mount_failure_is_persisted_as_unmounted(tmp_path, monkeypatch, 
     monkeypatch.setattr(module, "find_free_windows_drive", lambda requested: "Z:")
     monkeypatch.setattr(VFSServiceManager, "_mount_windows", lambda *args: None)
     registrations = []
-    monkeypatch.setattr(VFSServiceManager, "_register_windows_autostart", lambda *args: registrations.append(args))
+    monkeypatch.setattr(VFSServiceManager, "_register_windows_autostart", lambda *args: (registrations.append(args), True)[1])
     monkeypatch.setattr(VFSServiceManager, "_wait_for_mount", lambda *args: False)
     monkeypatch.setattr(VFSServiceManager, "_kill_vfs_process", lambda: None)
     monkeypatch.setattr(module.StorageManager, "get_path", lambda: str(physical_storage))
@@ -60,7 +60,7 @@ def test_windows_mount_is_persisted_only_after_visibility(tmp_path, monkeypatch,
     monkeypatch.setattr(
         VFSServiceManager,
         "_register_windows_autostart",
-        lambda *args: registrations.append(args),
+        lambda *args: (registrations.append(args), True)[1],
     )
     monkeypatch.setattr(module.StorageManager, "get_path", lambda: str(physical_storage))
     monkeypatch.setattr(module.StorageManager, "set_path", lambda path: storage_paths.append(path))
@@ -74,3 +74,36 @@ def test_windows_mount_is_persisted_only_after_visibility(tmp_path, monkeypatch,
     assert storage_paths == ["Z:"]
     assert len(registrations) == 1
     assert "Status: MOUNTED (Z:)" in output
+
+def test_mount_records_failed_autostart_registration(tmp_path, monkeypatch, capsys):
+    physical_storage = tmp_path / "physical"
+    state_file = tmp_path / "vfs_state.json"
+
+    monkeypatch.setattr(module, "detect_os", lambda: "windows")
+    monkeypatch.setattr(
+        module,
+        "load_vfs_state",
+        lambda: json.loads(state_file.read_text(encoding="utf-8")) if state_file.exists() else {},
+    )
+    monkeypatch.setattr(module, "get_vfs_state_file", lambda: state_file)
+    monkeypatch.setattr(
+        module,
+        "save_vfs_state",
+        lambda state: state_file.write_text(json.dumps(state), encoding="utf-8"),
+    )
+    monkeypatch.setattr(module, "find_free_windows_drive", lambda requested: "Z:")
+    monkeypatch.setattr(VFSServiceManager, "_mount_windows", lambda *args: None)
+    monkeypatch.setattr(VFSServiceManager, "_wait_for_mount", lambda *args: True)
+    monkeypatch.setattr(VFSServiceManager, "_register_windows_autostart", lambda *args: False)
+    monkeypatch.setattr(module.StorageManager, "get_path", lambda: str(physical_storage))
+    monkeypatch.setattr(module.StorageManager, "set_path", lambda path: None)
+    monkeypatch.setattr(VFSServiceManager, "is_mounted", lambda: True)
+
+    VFSServiceManager.mount(storage_path=str(physical_storage), target="Z:")
+    VFSServiceManager.status()
+
+    state = json.loads(state_file.read_text(encoding="utf-8"))
+    output = capsys.readouterr().out
+    assert state["status"] == "mounted"
+    assert state["autostart_enabled"] is False
+    assert "Boot Autostart        : NOT REGISTERED" in output

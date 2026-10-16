@@ -165,6 +165,7 @@ class VFSServiceManager:
         print(f"\n[NeuraFS VFS] Detected OS           : {os_type.upper()}")
         print(f"[NeuraFS VFS] Physical Storage Path : {physical_storage}")
 
+        autostart_ok = False
         if os_type == "windows":
             req_letter = target if (target and len(target.rstrip(":\\")) == 1) else None
             target_mount = find_free_windows_drive(req_letter)
@@ -173,7 +174,10 @@ class VFSServiceManager:
             cls._mount_windows(physical_storage, target_mount)
             mounted_ok = cls._wait_for_mount(os_type, target_mount)
             if mounted_ok:
-                cls._register_windows_autostart(physical_storage, target_mount)
+                try:
+                    autostart_ok = bool(cls._register_windows_autostart(physical_storage, target_mount))
+                except Exception as err:
+                    print(f"[NeuraFS Persistence Error] {err}")
 
         elif os_type == "linux":
             target_mount = str(Path.home() / "NeuraFS_Drive")
@@ -183,7 +187,10 @@ class VFSServiceManager:
             cls._mount_linux(physical_storage, target_mount)
             mounted_ok = cls._wait_for_mount(os_type, target_mount)
             if mounted_ok:
-                cls._register_linux_autostart(physical_storage, target_mount)
+                try:
+                    autostart_ok = bool(cls._register_linux_autostart(physical_storage, target_mount))
+                except Exception as err:
+                    print(f"[NeuraFS Persistence Error] {err}")
 
         else:
             raise RuntimeError(f"Unsupported operating system: {os_type}")
@@ -202,6 +209,7 @@ class VFSServiceManager:
             "physical_storage": physical_storage,
             "virtual_target": target_mount,
             "samba_enabled": enable_samba,
+            "autostart_enabled": autostart_ok,
             "mode": "read_write"
         })
 
@@ -258,7 +266,12 @@ class VFSServiceManager:
             print(f" • Mount Status          : MOUNTED [OK] (Read/Write)")
             print(f" • Virtual Partition     : {v_target}")
             print(f" • Physical Storage      : {p_storage}")
-            print(f" • Boot Autostart        : ACTIVE (Persisted via {'Task Scheduler' if os_type == 'windows' else 'systemd'})")
+            autostart_status = (
+                f"ACTIVE (Persisted via {'Task Scheduler' if os_type == 'windows' else 'systemd'})"
+                if state.get("autostart_enabled")
+                else "NOT REGISTERED"
+            )
+            print(f" • Boot Autostart        : {autostart_status}")
             print(f" • Samba VFS Share       : {'ENABLED [OK]' if state.get('samba_enabled') else 'DISABLED'}")
         else:
             print(f" • Mount Status          : UNMOUNTED [OFFLINE]")
@@ -357,8 +370,13 @@ class VFSServiceManager:
             "schtasks", "/create", "/tn", task_name,
             "/tr", action, "/sc", "onlogon", "/f"
         ]
-        run_silent_subprocess(cmd)
-        print(f"[NeuraFS Persistence] Cleaned old tasks and registered new Task Scheduler job '{task_name}'")
+        result = run_silent_subprocess(cmd)
+        if result.returncode != 0:
+            detail = (getattr(result, "stderr", None) or "").strip()
+            print(f"[NeuraFS Persistence Error] Task Scheduler registration failed: {detail or result.returncode}")
+            return False
+        print(f"[NeuraFS Persistence] Registered Task Scheduler job '{task_name}'")
+        return True
 
     @staticmethod
     def _remove_windows_autostart() -> None:
@@ -395,9 +413,14 @@ Restart=on-failure
 WantedBy=default.target
 """
         service_file.write_text(unit_content, encoding="utf-8")
-        subprocess.run(["systemctl", "--user", "daemon-reload"], check=False)
-        subprocess.run(["systemctl", "--user", "enable", "neurafs-vfs.service"], check=False)
-        print(f"[NeuraFS Persistence] Cleaned old services and registered new systemd unit '{service_file}'")
+        reload_result = run_silent_subprocess(["systemctl", "--user", "daemon-reload"])
+        enable_result = run_silent_subprocess(["systemctl", "--user", "enable", "neurafs-vfs.service"])
+        if reload_result.returncode != 0 or enable_result.returncode != 0:
+            detail = (getattr(enable_result, "stderr", None) or "").strip()
+            print(f"[NeuraFS Persistence Error] systemd registration failed: {detail or enable_result.returncode}")
+            return False
+        print(f"[NeuraFS Persistence] Registered systemd unit '{service_file}'")
+        return True
 
     @staticmethod
     def _remove_linux_autostart() -> None:
