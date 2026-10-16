@@ -47,6 +47,7 @@ const NeuraFSSDK = require('../sdk/node/hyper-compress-sdk');
 
 const app = express();
 const PORT = process.env.PORT || 3000;
+const HOST = process.env.HOST || '127.0.0.1';
 const PYTHON_API_URL = process.env.PYTHON_API_URL || 'http://127.0.0.1:8000';
 
 const sdk = new NeuraFSSDK(PYTHON_API_URL);
@@ -55,6 +56,10 @@ const activeTasks = {};
 app.use(express.json());
 app.use(express.urlencoded({ extended: true }));
 app.use(express.static(PUBLIC_DIR));
+
+app.get('/health', (req, res) => {
+    res.status(200).json({ status: 'ok', service: 'neurafs-web' });
+});
 
 // 2. Multer MemoryStorage (Без запишување на диск во .temp)
 const upload = multer({ 
@@ -377,9 +382,9 @@ app.use((req, res) => {
     res.sendFile(path.join(PUBLIC_DIR, 'index.html'));
 });
 
-app.listen(PORT, '127.0.0.1', () => {
+app.listen(PORT, HOST, () => {
     console.log(`===================================================`);
     console.log(` NeuraFS Single-User Web Engine Active on Port ${PORT}`);
-    console.log(` Access URL: http://127.0.0.1:${PORT}`);
+    console.log(` Access URL: http://${HOST}:${PORT}`);
     console.log(`===================================================`);
 });

@@ -1,14 +1,68 @@
 """NeuraFS Web UI Process Manager for CLI."""
 
+import json
 import os
 import sys
 import time
 import subprocess
 import psutil
 from pathlib import Path
+from urllib.request import urlopen
 
 WEB_DIR = os.path.dirname(os.path.abspath(__file__))
 APP_JS = os.path.join(WEB_DIR, "app.js")
+WEB_START_TIMEOUT = 10.0
+
+
+def _health_url(host: str, port: int) -> str:
+    probe_host = "127.0.0.1" if host in {"0.0.0.0", "::"} else host
+    if ":" in probe_host and not probe_host.startswith("["):
+        probe_host = f"[{probe_host}]"
+    return f"http://{probe_host}:{port}/health"
+
+
+def _web_endpoint_is_ready(host: str, port: int) -> bool:
+    try:
+        with urlopen(_health_url(host, port), timeout=0.5) as response:
+            payload = json.loads(response.read().decode("utf-8"))
+            return response.status == 200 and payload.get("service") == "neurafs-web"
+    except Exception:
+        return False
+
+
+def _read_web_log_tail(log_file: Path) -> str:
+    try:
+        return "".join(log_file.read_text(encoding="utf-8", errors="replace").splitlines(True)[-20:]).strip()
+    except OSError:
+        return ""
+
+
+def _wait_for_web_ready(proc, host: str, port: int, log_file: Path | None = None) -> None:
+    deadline = time.monotonic() + WEB_START_TIMEOUT
+    while True:
+        exit_code = proc.poll()
+        if exit_code is not None:
+            detail = _read_web_log_tail(log_file) if log_file else ""
+            message = f"Web process exited before its health endpoint became ready (exit code {exit_code})"
+            if detail:
+                message += f":\n{detail}"
+            raise RuntimeError(message)
+        if _web_endpoint_is_ready(host, port):
+            return
+        if time.monotonic() >= deadline:
+            raise RuntimeError(f"Web health endpoint did not respond within {WEB_START_TIMEOUT:g} seconds")
+        time.sleep(0.2)
+
+
+def _terminate_started_process(proc) -> None:
+    if proc is None or proc.poll() is not None:
+        return
+    proc.terminate()
+    try:
+        proc.wait(timeout=3.0)
+    except subprocess.TimeoutExpired:
+        proc.kill()
+        proc.wait(timeout=3.0)
 
 
 class WebManager:
@@ -59,44 +113,68 @@ class WebManager:
 
 
 def start_web(host: str = "127.0.0.1", port: int = 3000, daemon: bool = False) -> None:
-    """Starts the Node.js Web UI server."""
+    """Starts the Node.js Web UI server and confirms its health endpoint."""
     active_pid = WebManager.get_running_pid()
     if active_pid:
-        print(f"[NeuraFS Web] Web server is already running (PID: {active_pid}).")
-        return
+        if _web_endpoint_is_ready(host, port):
+            print(f"[NeuraFS Web] Web server is already running (PID: {active_pid}).")
+            return
+        raise RuntimeError(
+            f"Web process {active_pid} is tracked but http://{host}:{port}/health is not responding."
+        )
 
     if not os.path.exists(APP_JS):
-        print(f"[NeuraFS Web Error] app.js not found at {APP_JS}")
-        return
+        raise FileNotFoundError(f"NeuraFS Web app.js not found at {APP_JS}")
 
     env = os.environ.copy()
     env["HOST"] = host
     env["PORT"] = str(port)
-
     cmd = ["node", APP_JS]
+
     if daemon:
         from neurafs.utils.process import spawn_silent_daemon
 
-        proc = spawn_silent_daemon(
-            cmd,
-            cwd=WEB_DIR,
-            env=env,
-            stdout=subprocess.DEVNULL,
-            stderr=subprocess.DEVNULL,
-        )
-        WebManager.write_pid(proc.pid)
-        print(f"[NeuraFS Web] Background server launched on http://{host}:{port} (PID: {proc.pid})")
-    else:
-        print(f"[NeuraFS Web] Starting server on http://{host}:{port}...")
+        log_file = Path.home() / ".neurafs" / "logs" / "web.log"
+        log_file.parent.mkdir(parents=True, exist_ok=True)
+        proc = None
         try:
-            proc = subprocess.Popen(cmd, cwd=WEB_DIR, env=env)
+            with log_file.open("a", encoding="utf-8") as log_stream:
+                proc = spawn_silent_daemon(
+                    cmd,
+                    cwd=WEB_DIR,
+                    env=env,
+                    stdout=log_stream,
+                    stderr=subprocess.STDOUT,
+                )
+            _wait_for_web_ready(proc, host, port, log_file)
             WebManager.write_pid(proc.pid)
-            proc.wait()
-        except KeyboardInterrupt:
-            print("\n[NeuraFS Web] Stopping server...")
-            proc.terminate()
-        finally:
+        except Exception as err:
+            _terminate_started_process(proc)
             WebManager.clear_pid()
+            raise RuntimeError(
+                f"Background web server failed to start. Log: {log_file}. {err}"
+            ) from err
+
+        print(f"[NeuraFS Web] Background server ready on http://{host}:{port} (PID: {proc.pid})")
+        return
+
+    print(f"[NeuraFS Web] Starting server on http://{host}:{port}...")
+    proc = None
+    try:
+        proc = subprocess.Popen(cmd, cwd=WEB_DIR, env=env)
+        _wait_for_web_ready(proc, host, port)
+        WebManager.write_pid(proc.pid)
+        print(f"[NeuraFS Web] Server ready on http://{host}:{port} (PID: {proc.pid})")
+        exit_code = proc.wait()
+        raise RuntimeError(f"Web process exited unexpectedly with code {exit_code}.")
+    except KeyboardInterrupt:
+        print("\n[NeuraFS Web] Stopping server...")
+        _terminate_started_process(proc)
+    except Exception:
+        _terminate_started_process(proc)
+        raise
+    finally:
+        WebManager.clear_pid()
 
 
 def stop_web() -> bool:
