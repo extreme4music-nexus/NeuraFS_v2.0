@@ -9,7 +9,7 @@ import sys
 import shutil
 import subprocess
 from pathlib import Path
-from typing import Dict, Any
+from typing import Dict, Any, Optional
 
 
 class SambaManager:
@@ -37,8 +37,18 @@ class SambaManager:
         return False
 
     @classmethod
-    def setup_share(cls, physical_storage_path: str) -> Dict[str, Any]:
+    def setup_share(
+        cls,
+        physical_storage_path: str,
+        share_name: Optional[str] = None,
+        read_only: bool = False,
+        guest_ok: bool = True,
+        comment: str = "NeuraFS Virtual Neural Media Storage"
+    ) -> Dict[str, Any]:
         """Safely injects NeuraFS share configuration into smb.conf and reloads smbd."""
+        if share_name:
+            cls.SHARE_NAME = share_name
+
         if not cls.is_available():
             return {"status": "skipped", "reason": "Samba (smbd) not installed on host."}
 
@@ -54,13 +64,16 @@ class SambaManager:
         has_c_plugin = cls._check_c_plugin_exists()
         vfs_directive = "   vfs objects = neurafs\n" if has_c_plugin else ""
 
+        read_only_str = "yes" if read_only else "no"
+        guest_ok_str = "yes" if guest_ok else "no"
+
         share_config = f"""
 # --- NeuraFS Managed Share Start ---
 [{cls.SHARE_NAME}]
-   comment = NeuraFS Virtual Neural Media Storage
+   comment = {comment}
    path = {abs_storage}
-   read only = no
-   guest ok = yes
+   read only = {read_only_str}
+   guest ok = {guest_ok_str}
    browseable = yes
    create mask = 0777
    directory mask = 0777
@@ -76,10 +89,58 @@ class SambaManager:
                 "status": "success",
                 "share_name": cls.SHARE_NAME,
                 "path": abs_storage,
+                "read_only": read_only,
+                "guest_ok": guest_ok,
                 "c_plugin_active": has_c_plugin
             }
         except Exception as err:
             return {"status": "error", "reason": str(err)}
+
+    @classmethod
+    def get_share_details(cls) -> Dict[str, Any]:
+        """Parses smb.conf and returns active NeuraFS share configuration."""
+        details = {
+            "active": False,
+            "share_name": cls.SHARE_NAME,
+            "path": None,
+            "read_only": None,
+            "guest_ok": None,
+            "c_plugin_active": cls._check_c_plugin_exists()
+        }
+        if not cls.SMB_CONF_PATH.exists():
+            return details
+
+        try:
+            content = cls.SMB_CONF_PATH.read_text(encoding="utf-8")
+            if f"[{cls.SHARE_NAME}]" in content or "[NeuraFS" in content:
+                details["active"] = True
+                lines = content.splitlines()
+                in_block = False
+                for line in lines:
+                    stripped = line.strip()
+                    if stripped.startswith("[NeuraFS") or stripped == f"[{cls.SHARE_NAME}]":
+                        in_block = True
+                        if stripped.startswith("[") and stripped.endswith("]"):
+                            details["share_name"] = stripped[1:-1]
+                        continue
+                    if in_block and stripped.startswith("[") and stripped.endswith("]"):
+                        break
+                    if in_block:
+                        if stripped.startswith("path"):
+                            parts = stripped.split("=", 1)
+                            if len(parts) == 2:
+                                details["path"] = parts[1].strip()
+                        elif stripped.startswith("read only"):
+                            parts = stripped.split("=", 1)
+                            if len(parts) == 2:
+                                details["read_only"] = (parts[1].strip().lower() == "yes")
+                        elif stripped.startswith("guest ok"):
+                            parts = stripped.split("=", 1)
+                            if len(parts) == 2:
+                                details["guest_ok"] = (parts[1].strip().lower() == "yes")
+        except Exception:
+            pass
+        return details
 
     @classmethod
     def remove_share(cls, reload_service: bool = True) -> bool:
@@ -89,7 +150,7 @@ class SambaManager:
 
         try:
             content = cls.SMB_CONF_PATH.read_text(encoding="utf-8")
-            if f"[{cls.SHARE_NAME}]" not in content:
+            if f"[{cls.SHARE_NAME}]" not in content and "[NeuraFS" not in content:
                 return True
 
             lines = content.splitlines()
@@ -97,7 +158,7 @@ class SambaManager:
             skipping = False
 
             for line in lines:
-                if "# --- NeuraFS Managed Share Start ---" in line or f"[{cls.SHARE_NAME}]" in line:
+                if "# --- NeuraFS Managed Share Start ---" in line or f"[{cls.SHARE_NAME}]" in line or (line.strip().startswith("[NeuraFS") and line.strip().endswith("]")):
                     skipping = True
                     continue
                 if skipping and "# --- NeuraFS Managed Share End ---" in line:
@@ -130,4 +191,4 @@ class SambaManager:
             Path("/usr/lib64/samba/vfs/neurafs.so"),
             Path("/usr/lib/samba/vfs/neurafs.so"),
         ]
-        return any(p.exists() for p in possible_paths)
+        return any(p.exists() for p in possible_paths)

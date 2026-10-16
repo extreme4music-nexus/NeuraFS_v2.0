@@ -71,6 +71,9 @@ class SirenAgent(nn.Module):
         state_dict = self.state_dict()
         buffer = bytearray()
 
+        if isinstance(precision, str):
+            precision = PrecisionMode.HIGH_32 if precision == "fp32" else PrecisionMode.STANDARD_16
+
         dtype = np.float16 if precision == PrecisionMode.STANDARD_16 else np.float32
 
         for key, tensor in state_dict.items():
@@ -100,6 +103,9 @@ class SirenAgent(nn.Module):
         state_dict = {}
 
         offset = 0
+        if isinstance(precision, str):
+            precision = PrecisionMode.HIGH_32 if precision == "fp32" else PrecisionMode.STANDARD_16
+
         dtype = np.float16 if precision == PrecisionMode.STANDARD_16 else np.float32
 
         for key in agent.state_dict().keys():
@@ -156,8 +162,8 @@ def compute_composite_loss(predictions: torch.Tensor, targets: torch.Tensor) -> 
 
     # Create Hann window on the same compute device to suppress warning & prevent spectral leakage
     window = torch.hann_window(256).to(predictions.device)
-    stft_pred = torch.stft(predictions.squeeze().transpose(-2, -1), n_fft=256, hop_length=64, window=window, return_complex=True)
-    stft_tgt = torch.stft(targets.squeeze().transpose(-2, -1), n_fft=256, hop_length=64, window=window, return_complex=True)
+    stft_pred = torch.stft(pred_stft_in, n_fft=256, hop_length=64, window=window, return_complex=True)
+    stft_tgt = torch.stft(target_stft_in, n_fft=256, hop_length=64, window=window, return_complex=True)
 
     spectral_loss = nn.L1Loss()(torch.abs(stft_pred), torch.abs(stft_tgt))
 

@@ -117,12 +117,12 @@ class NeuraFSEngine:
         if num_chunks is not None:
             info["num_chunks"] = num_chunks
 
-        codec_id = (
-            codec
-            or info.get("codec")
-            or _architecture_to_codec(info.get("architecture"))
-            or config.DEFAULT_CODEC
-        )
+        if isinstance(precision, str):
+            precision = PrecisionMode.HIGH_32 if precision == "fp32" else PrecisionMode.STANDARD_16
+
+        # Smart container auto-codec binding: original container codec takes strict precedence over external assignments
+        bound_codec = info.get("codec") or _architecture_to_codec(info.get("architecture"))
+        codec_id = bound_codec or codec or config.DEFAULT_CODEC
         agent = get_codec(str(codec_id))
         return agent.decode_media(
             chunk_units=chunk_units,

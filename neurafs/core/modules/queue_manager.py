@@ -45,6 +45,9 @@ class QueueManager:
             return
 
         abs_path = os.path.abspath(file_path)
+        if abs_path.endswith(".hcs") or os.path.exists(f"{abs_path}.hcs") or StateManager.is_processed(abs_path):
+            return
+
         file_name = os.path.basename(abs_path)
         file_hash = cls._get_quick_hash(abs_path)
 

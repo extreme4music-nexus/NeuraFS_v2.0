@@ -6,9 +6,11 @@ import scipy.signal as signal
 
 def calculate_si_sdr(target: np.ndarray, estimate: np.ndarray) -> float:
     """Calculates Scale-Invariant Signal-to-Distortion Ratio (SI-SDR) in dB."""
-    min_len = min(len(target), len(estimate))
-    s_target = target[:min_len]
-    s_estimate = estimate[:min_len]
+    s_target = target.flatten()
+    s_estimate = estimate.flatten()
+    min_len = min(len(s_target), len(s_estimate))
+    s_target = s_target[:min_len]
+    s_estimate = s_estimate[:min_len]
 
     alpha = np.dot(s_estimate, s_target) / (np.dot(s_target, s_target) + 1e-9)
     e_target = alpha * s_target
@@ -20,9 +22,11 @@ def calculate_si_sdr(target: np.ndarray, estimate: np.ndarray) -> float:
 
 def calculate_lsd(target: np.ndarray, estimate: np.ndarray, sample_rate: int = 44100) -> float:
     """Calculates Log-Spectral Distance (LSD) between original and synthesized signals."""
-    min_len = min(len(target), len(estimate))
-    _, _, stft_target = signal.stft(target[:min_len], fs=sample_rate, nperseg=512)
-    _, _, stft_est = signal.stft(estimate[:min_len], fs=sample_rate, nperseg=512)
+    s_target = target.flatten()
+    s_estimate = estimate.flatten()
+    min_len = min(len(s_target), len(s_estimate))
+    _, _, stft_target = signal.stft(s_target[:min_len], fs=sample_rate, nperseg=512)
+    _, _, stft_est = signal.stft(s_estimate[:min_len], fs=sample_rate, nperseg=512)
 
     lsd = np.mean(
         np.sqrt(
@@ -32,6 +36,8 @@ def calculate_lsd(target: np.ndarray, estimate: np.ndarray, sample_rate: int = 4
             )
         )
     )
+    return float(lsd)
+
 
 def compute_mse(reference: np.ndarray, estimate: np.ndarray) -> float:
     """Calculates Mean Squared Error (MSE) between reference and estimated audio signals."""
@@ -45,8 +51,12 @@ def compute_mse(reference: np.ndarray, estimate: np.ndarray) -> float:
 
 def compute_metrics(reference: np.ndarray, estimate: np.ndarray, sample_rate: int = 44100) -> dict[str, float]:
     """Unified wrapper computing complete fidelity metrics dictionary (SI-SDR, LSD, MSE)."""
-    si_sdr = compute_si_sdr(reference, estimate)
-    lsd = compute_lsd(reference, estimate, sample_rate)
+    si_sdr = calculate_si_sdr(reference, estimate)
+    lsd = calculate_lsd(reference, estimate, sample_rate)
     mse = compute_mse(reference, estimate)
     
-    return float(lsd)
+    return {
+        "si_sdr_db": round(si_sdr, 2),
+        "lsd": round(lsd, 4),
+        "mse": round(mse, 6),
+    }

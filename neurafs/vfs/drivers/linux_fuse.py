@@ -49,12 +49,12 @@ class NeuraFSFUSE(Operations):
     def readdir(self, path: str, fh: Any) -> List[str]:
         """Lists directory entries for ls / readdir() calls."""
         entries = [".", ".."]
-        if path == "/":
-            try:
-                attrs = self.vfs.readdir("")
-                entries.extend([a.name for a in attrs])
-            except Exception:
-                raise FuseOSError(errno.EIO)
+        rel_path = path.lstrip("/")
+        try:
+            items = self.vfs.readdir(rel_path)
+            entries.extend([item["name"] for item in items])
+        except Exception:
+            raise FuseOSError(errno.EIO)
         return entries
 
     def open(self, path: str, flags: int) -> int:

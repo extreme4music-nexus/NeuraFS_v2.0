@@ -52,63 +52,27 @@ class RAMStreamBuffer:
         self.cache_limit = 3
 
     def _resynchronize_single_chunk(self, chunk_idx: int) -> np.ndarray:
-        """Evaluates neural agents for a single 2.5s temporal chunk in RAM."""
+        """Evaluates neural agents for a single 2.5s temporal chunk in RAM using container-bound codec."""
         units = self.chunks_map.get(chunk_idx, [])
         if not units:
             return np.zeros((self.channels, int(self.sample_rate * config.CHUNK_DURATION_SEC)), dtype=np.float32)
 
-        codec_id = (self.neural_info.get("codec") or self.neural_info.get("architecture") or "siren")
-        codec_id = str(codec_id).strip().lower()
-        if codec_id not in ("siren",):
-            blob_list = [
-                self.raw_blobs_data[u["offset"] : u["offset"] + u["length"]] for u in units
-            ]
-            chunk_pcm = NeuraFSEngine.resynthesize_audio_from_units(
-                chunk_units=units,
-                blob_list=blob_list,
-                channels=self.channels,
-                sample_rate=self.sample_rate,
-                precision=self.precision,
-                neural_info=self.neural_info,
-                num_chunks=1,
-            )
-            if self.target_sample_rate != self.sample_rate:
-                chunk_pcm = resample_poly(
-                    chunk_pcm, self.target_sample_rate, self.sample_rate, axis=-1
-                ).astype(np.float32)
-            return chunk_pcm
-
-        device = torch.device("cpu")
-        samples_per_chunk = int(self.sample_rate * config.CHUNK_DURATION_SEC)
-        t_coords = torch.linspace(-1.0, 1.0, steps=samples_per_chunk, dtype=torch.float32).unsqueeze(-1).to(device)
-
-        subband_pcm_list = []
-        for unit in units:
-            offset = unit["offset"]
-            length = unit["length"]
-            raw_blob = self.raw_blobs_data[offset : offset + length]
-
-            agent = SirenAgent.deserialize_weights(
-                raw_blob,
-                in_features=1,
-                hidden_features=self.neural_info.get("hidden_features", config.SIREN_HIDDEN_FEATURES),
-                hidden_layers=self.neural_info.get("hidden_layers", config.SIREN_HIDDEN_LAYERS),
-                out_features=self.channels,
-                precision=self.precision,
-            ).to(device)
-
-            agent.eval()
-            with torch.no_grad():
-                pred_pcm = agent(t_coords).cpu().numpy().T
-            subband_pcm_list.append(pred_pcm)
-
-        # Synthesize subbands into full-spectrum chunk PCM
-        chunk_pcm = SubbandFilterBank.synthesize_subbands(subband_pcm_list)
-
-        # Apply Adaptive Resampling if hardware forces fallback tier (e.g. 44100Hz -> 22050Hz)
+        blob_list = [
+            self.raw_blobs_data[u["offset"] : u["offset"] + u["length"]] for u in units
+        ]
+        chunk_pcm = NeuraFSEngine.resynthesize_audio_from_units(
+            chunk_units=units,
+            blob_list=blob_list,
+            channels=self.channels,
+            sample_rate=self.sample_rate,
+            precision=self.precision,
+            neural_info=self.neural_info,
+            num_chunks=1,
+        )
         if self.target_sample_rate != self.sample_rate:
-            chunk_pcm = resample_poly(chunk_pcm, self.target_sample_rate, self.sample_rate, axis=-1).astype(np.float32)
-
+            chunk_pcm = resample_poly(
+                chunk_pcm, self.target_sample_rate, self.sample_rate, axis=-1
+            ).astype(np.float32)
         return chunk_pcm
 
     def get_priority_chunk_0_pcm(self) -> Tuple[np.ndarray, int]:
@@ -137,38 +101,36 @@ class RAMStreamBuffer:
     def read_pcm_bytes(self, offset: int, length: int) -> bytes:
         """Handles byte-exact random-access read requests from the OS kernel."""
         wav_header = self._generate_wav_header()
+        requested_length = length
+        result = bytearray()
         
-        # Сценарио 1: Оперативниот систем го чита WAV заглавието (првите 44 бајти)
+        # Scenario 1: Intercept RIFF header (bytes 0 to 43)
         if offset < 44:
-            header_slice = wav_header[offset : offset + length]
-            if len(header_slice) == length:
-                return header_slice
-            # Ако бара повеќе податоци одеднаш, го адаптираме офсетот за понатаму
-            offset = 44
-            length -= len(header_slice)
-            result = bytearray(header_slice)
+            header_slice = wav_header[offset : offset + requested_length]
+            result.extend(header_slice)
+            if len(result) >= requested_length:
+                return bytes(result)
+            current_pcm_offset = 0
         else:
-            result = bytearray()
-            
-        # Сценарио 2: Читање на аудио бајти (пресметка кој чанк ни треба)
-        adjusted_offset = offset - 44
+            current_pcm_offset = offset - 44
+
+        # Scenario 2: PCM Audio Payload
         bytes_per_sample = 2
         chunk_samples = int(self.target_sample_rate * config.CHUNK_DURATION_SEC)
         chunk_bytes = chunk_samples * self.channels * bytes_per_sample
         
-        start_chunk = adjusted_offset // chunk_bytes
-        end_chunk = (adjusted_offset + length) // chunk_bytes
+        start_chunk = current_pcm_offset // chunk_bytes
+        bytes_needed = requested_length - len(result)
+        end_chunk = (current_pcm_offset + bytes_needed) // chunk_bytes
         
         for c_idx in range(start_chunk, end_chunk + 1):
             if c_idx >= self.total_chunks:
                 break
                 
-            # Провери дали веќе сме го декодирале овој чанк неодамна (RAM Кеш)
             if c_idx in self.chunk_cache:
                 chunk_pcm_bytes = self.chunk_cache[c_idx]
-                self.chunk_cache.move_to_end(c_idx)  # Освежи го во кешот
+                self.chunk_cache.move_to_end(c_idx)
             else:
-                # Декодирај го чанкот само ако мора
                 pcm_float = self._resynchronize_single_chunk(c_idx)
                 chunk_pcm_bytes = (np.clip(pcm_float, -1.0, 1.0) * 32767.0).astype(np.int16).T.tobytes()
                 
@@ -176,12 +138,15 @@ class RAMStreamBuffer:
                 if len(self.chunk_cache) > self.cache_limit:
                     self.chunk_cache.popitem(last=False)
                     
-            # Прецизно сечење на потребните бајти од чанкот
             chunk_start_pos = c_idx * chunk_bytes
-            local_offset = max(0, adjusted_offset - chunk_start_pos)
-            bytes_to_take = min(len(chunk_pcm_bytes) - local_offset, length - len(result))
+            local_offset = max(0, current_pcm_offset - chunk_start_pos)
+            remaining_needed = requested_length - len(result)
+            bytes_to_take = min(len(chunk_pcm_bytes) - local_offset, remaining_needed)
             
             result.extend(chunk_pcm_bytes[local_offset : local_offset + bytes_to_take])
+            if len(result) >= requested_length:
+                break
+            current_pcm_offset = chunk_start_pos + len(chunk_pcm_bytes)
             
         return bytes(result)
 

@@ -1,6 +1,8 @@
 """NeuraFS Dynamic Hardware, Resource Orchestration & Quality Configuration Module."""
 
 import os
+import json
+from pathlib import Path
 from enum import Enum
 from dataclasses import dataclass
 from typing import Tuple
@@ -49,8 +51,38 @@ class EngineConfig:
     DEFAULT_SAMPLE_RATE: int = 44100
     CHUNK_DURATION_SEC: float = 2.5
 
-    # Active neural codec id (siren | dac | encodec). SIREN remains a first-class alternative.
-    DEFAULT_CODEC: str = "siren"
+    @property
+    def DEFAULT_CODEC(self) -> str:
+        """Returns the active default neural codec ID from configuration or fallback (default: dac)."""
+        config_file = Path.home() / ".neurafs" / "config.json"
+        if config_file.exists():
+            try:
+                with open(config_file, "r", encoding="utf-8") as f:
+                    data = json.load(f)
+                    return data.get("default_codec", "dac")
+            except Exception:
+                pass
+        return "dac"
+
+    @classmethod
+    def set_default_codec(cls, codec_name: str) -> str:
+        """Saves the new default neural codec ID to ~/.neurafs/config.json."""
+        config_dir = Path.home() / ".neurafs"
+        config_dir.mkdir(parents=True, exist_ok=True)
+        config_file = config_dir / "config.json"
+        data = {}
+        if config_file.exists():
+            try:
+                with open(config_file, "r", encoding="utf-8") as f:
+                    data = json.load(f)
+            except Exception:
+                data = {}
+        clean_name = codec_name.lower().strip()
+        data["default_codec"] = clean_name
+        with open(config_file, "w", encoding="utf-8") as f:
+            json.dump(data, f, indent=4)
+        return clean_name
+
     # Fallback subband count when manifest omits neural.subbands
     DEFAULT_SUBBANDS: int = 4
 

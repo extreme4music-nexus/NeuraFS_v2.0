@@ -68,7 +68,8 @@ class ServiceOrchestrator:
         """Executes strict sequential startup across VFS, API, Web UI, and Samba."""
         results = {}
 
-        print("\n🚀 --- Starting NeuraFS Ecosystem Services ---")
+        # Use an ASCII banner to avoid cp1252 encoding issues on Windows.
+        print("\n[START] --- Starting NeuraFS Ecosystem Services ---")
 
         # 1. Start VFS Driver & Mount Virtual Drive
         print("[1/4] Mounting Virtual File System Partition...")
@@ -206,34 +207,34 @@ class ServiceOrchestrator:
 
         # Check VFS
         vfs_mounted = VFSServiceManager.is_mounted()
-        print(f" • VFS Partition   : {'MOUNTED ✅' if vfs_mounted else 'UNMOUNTED ❌'}")
+        print(f" • VFS Partition   : {'MOUNTED [OK]' if vfs_mounted else 'UNMOUNTED [OFFLINE]'}")
 
         # Check API Status
-        print(" • Api Gateway   : ", end="")
+        print(" • Api Gateway     : ", end="")
         try:
             status_api()
         except Exception:
-            print("OFFLINE ❌")
+            print("OFFLINE [OFFLINE]")
 
         # Check Web UI Status
         print(" • Web Dashboard   : ", end="")
         try:
             status_web()
         except Exception:
-            print("OFFLINE ❌")
+            print("OFFLINE [OFFLINE]")
 
         # Check Samba Network Share
         if SambaManager.is_available():
             samba_active = SambaManager.is_share_active()
-            print(f" • Samba Share     : {'ACTIVE ✅' if samba_active else 'INACTIVE ℹ️'}")
+            print(f" • Samba Share     : {'ACTIVE [OK]' if samba_active else 'INACTIVE'}")
         else:
             print(" • Samba Share     : N/A (Windows SMB Host)")
         
         # Check File Watcher
         watcher_active = NeuraFSWatcher.is_active()
-        print(f" • File Watcher    : {'ACTIVE ✅' if watcher_active else 'INACTIVE ❌'}")
+        print(f" • File Watcher    : {'ACTIVE [OK]' if watcher_active else 'INACTIVE [OFFLINE]'}")
         
-        # Check Que Manager
+        # Check Queue Manager
         try:
             from neurafs.core.modules.queue_manager import QueueManager
             q = QueueManager.get_status_summary()
@@ -243,7 +244,7 @@ class ServiceOrchestrator:
         
         # Check Autostart Status
         is_auto = cls.is_autostart_enabled()
-        print(f" • Boot Persistence: {'ENABLED ✅' if is_auto else 'DISABLED ❌'}")
+        print(f" • Boot Persistence: {'ENABLED [OK]' if is_auto else 'DISABLED [OFFLINE]'}")
 
         print("===================================================\n")
         
@@ -269,16 +270,20 @@ class ServiceOrchestrator:
         cli_script = os.path.abspath(os.path.join(os.path.dirname(os.path.dirname(__file__)), "cli.py"))
 
         if os_type == "windows":
+            from neurafs.utils.process import run_silent_subprocess
+
             task_name = "NeuraFS_Master_Daemon"
             action = f'"{python_exe}" "{cli_script}" service start'
             cmd = [
                 "schtasks", "/create", "/tn", task_name,
                 "/tr", action, "/sc", "onlogon", "/f"
             ]
-            res = subprocess.run(cmd, capture_output=True, text=True, check=False)
+            res = run_silent_subprocess(cmd)
             return res.returncode == 0
 
         elif os_type == "linux":
+            from neurafs.utils.process import run_silent_subprocess
+
             user_systemd_dir = Path.home() / ".config" / "systemd" / "user"
             user_systemd_dir.mkdir(parents=True, exist_ok=True)
             service_file = user_systemd_dir / "neurafs-master.service"
@@ -297,8 +302,8 @@ ExecStop={sys.executable} "{cli_script}" service stop
 WantedBy=default.target
 """
             service_file.write_text(unit_content, encoding="utf-8")
-            subprocess.run(["systemctl", "--user", "daemon-reload"], check=False)
-            res = subprocess.run(["systemctl", "--user", "enable", "neurafs-master.service"], check=False)
+            run_silent_subprocess(["systemctl", "--user", "daemon-reload"])
+            res = run_silent_subprocess(["systemctl", "--user", "enable", "neurafs-master.service"])
             return res.returncode == 0
 
         return False
@@ -306,6 +311,8 @@ WantedBy=default.target
     @classmethod
     def disable_autostart(cls) -> bool:
         """Unregisters Master Boot Service from OS."""
+        from neurafs.utils.process import run_silent_subprocess
+
         os_type = "windows" if sys.platform == "win32" else "linux"
 
         if not cls.is_admin():
@@ -319,27 +326,29 @@ WantedBy=default.target
         if os_type == "windows":
             task_name = "NeuraFS_Master_Daemon"
             cmd = ["schtasks", "/delete", "/tn", task_name, "/f"]
-            res = subprocess.run(cmd, capture_output=True, text=True, check=False)
+            res = run_silent_subprocess(cmd)
             return res.returncode == 0
         elif os_type == "linux":
-            subprocess.run(["systemctl", "--user", "disable", "neurafs-master.service"], check=False)
+            run_silent_subprocess(["systemctl", "--user", "disable", "neurafs-master.service"])
             service_file = Path.home() / ".config" / "systemd" / "user" / "neurafs-master.service"
             if service_file.exists():
                 try:
                     os.remove(service_file)
                 except OSError:
                     pass
-            subprocess.run(["systemctl", "--user", "daemon-reload"], check=False)
+            run_silent_subprocess(["systemctl", "--user", "daemon-reload"])
             return True
         return False
 
     @classmethod
     def is_autostart_enabled(cls) -> bool:
         """Checks if Master Boot Service is registered in Task Scheduler or systemd."""
+        from neurafs.utils.process import run_silent_subprocess
+
         os_type = "windows" if sys.platform == "win32" else "linux"
         if os_type == "windows":
             task_name = "NeuraFS_Master_Daemon"
-            res = subprocess.run(["schtasks", "/query", "/tn", task_name], capture_output=True, text=True, check=False)
+            res = run_silent_subprocess(["schtasks", "/query", "/tn", task_name])
             return res.returncode == 0
         elif os_type == "linux":
             service_file = Path.home() / ".config" / "systemd" / "user" / "neurafs-master.service"

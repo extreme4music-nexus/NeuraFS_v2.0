@@ -39,10 +39,9 @@ class SubbandFilterBank:
             # Use Second-Order Sections (SOS) for numerical stability in floating-point math
             sos = butter(N=4, Wn=[low_norm, high_norm], btype="bandpass", output="sos")
 
-            if is_stereo:
-                filtered_ch0 = sosfiltfilt(sos, pcm_data[0])
-                filtered_ch1 = sosfiltfilt(sos, pcm_data[1])
-                band_pcm = np.vstack([filtered_ch0, filtered_ch1]).astype(np.float32)
+            if pcm_data.ndim > 1:
+                filtered_channels = [sosfiltfilt(sos, pcm_data[c]) for c in range(pcm_data.shape[0])]
+                band_pcm = np.vstack(filtered_channels).astype(np.float32)
             else:
                 band_pcm = sosfiltfilt(sos, pcm_data).astype(np.float32)
 

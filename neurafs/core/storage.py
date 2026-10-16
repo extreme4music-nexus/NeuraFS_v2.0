@@ -22,7 +22,7 @@ class StorageManager:
 
     @classmethod
     def get_path(cls) -> str:
-        """Returns the configured absolute storage root path."""
+        """Returns the configured absolute storage root path with fallback if virtual drive is unmounted."""
         cls._ensure_config_dir()
         if not CONFIG_FILE.exists():
             cls.set_path(str(DEFAULT_STORAGE))
@@ -31,8 +31,18 @@ class StorageManager:
             with open(CONFIG_FILE, "r", encoding="utf-8") as f:
                 data = json.load(f)
                 path = data.get("storage_path", str(DEFAULT_STORAGE))
-                cls.init_structure(path)
-                return os.path.abspath(path)
+                abs_p = os.path.abspath(path)
+
+                # Windows drive check: if configured drive letter (e.g. Z:\) doesn't exist, fall back to home storage
+                if os.name == "nt" and len(abs_p.rstrip("\\/")) <= 2:
+                    drive_check = f"{abs_p.rstrip('\\/')}\\"
+                    if not (os.path.exists(drive_check) or os.path.isdir(drive_check)):
+                        fallback = str(Path.home() / ".neurafs" / "storage")
+                        cls.init_structure(fallback)
+                        return os.path.abspath(fallback)
+
+                cls.init_structure(abs_p)
+                return abs_p
         except Exception:
             return os.path.abspath(str(DEFAULT_STORAGE))
 
@@ -54,8 +64,16 @@ class StorageManager:
         cls.init_structure(abs_path)
         
         cls._ensure_config_dir()
+        data = {}
+        if CONFIG_FILE.exists():
+            try:
+                with open(CONFIG_FILE, "r", encoding="utf-8") as f:
+                    data = json.load(f)
+            except Exception:
+                data = {}
+        data["storage_path"] = abs_path
         with open(CONFIG_FILE, "w", encoding="utf-8") as f:
-            json.dump({"storage_path": abs_path}, f, indent=4)
+            json.dump(data, f, indent=4)
         return abs_path
 
     @classmethod

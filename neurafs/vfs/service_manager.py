@@ -56,15 +56,44 @@ def detect_os() -> str:
     return sys.platform
 
 
-def find_free_windows_drive() -> str:
-    """Scans Windows logical drives and returns the first available drive letter from Z: down to D:."""
+def find_free_windows_drive(requested_drive: Optional[str] = None) -> str:
+    """Scans Windows logical drives and returns an available drive letter.
+    
+    If requested_drive is specified and free, uses it; otherwise scans from Z: down to D:.
+    Checks both GetLogicalDrives bitmask and filesystem path accessibility.
+    """
     import string
     from ctypes import windll
 
-    bitmask = windll.kernel32.GetLogicalDrives()
-    for letter in reversed(string.ascii_uppercase[3:26]):  # D: to Z:
-        if not (bitmask & (1 << (ord(letter) - ord("A")))):
+    bitmask = 0
+    try:
+        bitmask = windll.kernel32.GetLogicalDrives()
+    except Exception:
+        pass
+
+    def is_drive_free(letter: str) -> bool:
+        shift = ord(letter.upper()) - ord("A")
+        if 0 <= shift <= 25 and bitmask:
+            if bitmask & (1 << shift):
+                return False
+        drive_path = f"{letter.upper()}:\\"
+        try:
+            if os.path.exists(drive_path) or os.path.isdir(drive_path):
+                return False
+        except Exception:
+            pass
+        return True
+
+    if requested_drive:
+        clean = requested_drive.strip().upper().rstrip(":\\")
+        if len(clean) == 1 and clean.isalpha():
+            if is_drive_free(clean):
+                return f"{clean}:"
+
+    for letter in reversed(string.ascii_uppercase[3:26]):  # Z: down to D:
+        if is_drive_free(letter):
             return f"{letter}:"
+
     return "Z:"
 
 
@@ -77,10 +106,18 @@ class VFSServiceManager:
         state = load_vfs_state()
         if state and state.get("status") == "mounted":
             target = state.get("virtual_target")
-            if target and os.path.exists(target):
+            if target:
+                target_check = f"{target}\\" if len(target) == 2 and target.endswith(":") else target
+                if os.path.exists(target_check) or os.path.isdir(target_check):
+                    return True
+        # Fallback dynamic check: if current StorageManager path is an active Windows drive letter, consider mounted
+        sm_path = StorageManager.get_path()
+        if sys.platform == "win32" and len(sm_path.rstrip("\\/")) <= 2:
+            drive_check = f"{sm_path.rstrip('\\/')}\\"
+            if os.path.exists(drive_check) or os.path.isdir(drive_check):
                 return True
         return False
-    
+
     @classmethod
     def mount(
         cls,
@@ -90,29 +127,41 @@ class VFSServiceManager:
     ) -> None:
         """Mounts physical storage directory to an OS virtual drive/folder with startup persistence."""
         os_type = detect_os()
+        state = load_vfs_state()
 
+        # 1. Resolve actual physical disk directory (preventing virtual drive letters like "X:\")
         raw_path = storage_path or target
-        physical_storage = (
-            os.path.abspath(raw_path)
-            if raw_path
-            else StorageManager.get_path()
-        )
-        if not os.path.exists(physical_storage):
-            os.makedirs(physical_storage, exist_ok=True)
+        if raw_path and not (os_type == "windows" and len(raw_path.rstrip("\\/")) <= 2):
+            physical_storage = os.path.abspath(raw_path)
+        elif state.get("physical_storage"):
+            physical_storage = state.get("physical_storage")
+        else:
+            sm_path = StorageManager.get_path()
+            if os_type == "windows" and len(sm_path.rstrip("\\/")) <= 2:
+                physical_storage = str(Path.home() / ".neurafs" / "storage")
+            else:
+                physical_storage = sm_path
+
+        # 2. Ensure real physical storage folder exists
+        os.makedirs(physical_storage, exist_ok=True)
 
         print(f"\n[NeuraFS VFS] Detected OS           : {os_type.upper()}")
         print(f"[NeuraFS VFS] Physical Storage Path : {physical_storage}")
 
         if os_type == "windows":
-            target_mount = find_free_windows_drive()
+            req_letter = target if (target and len(target.rstrip(":\\")) == 1) else None
+            target_mount = find_free_windows_drive(req_letter)
             print(f"[NeuraFS VFS] Selected Free Drive  : {target_mount}")
 
             cls._mount_windows(physical_storage, target_mount)
             cls._register_windows_autostart(physical_storage, target_mount)
 
-            # Wait up to 3 seconds for Windows Kernel to make the drive visible
+            # Check drive visibility
+            drive_check = f"{target_mount}\\"
+            mounted_ok = False
             for _ in range(10):
-                if os.path.exists(target_mount):
+                if os.path.exists(drive_check) or os.path.isdir(drive_check) or os.path.exists(target_mount):
+                    mounted_ok = True
                     break
                 time.sleep(0.3)
 
@@ -123,6 +172,7 @@ class VFSServiceManager:
 
             cls._mount_linux(physical_storage, target_mount)
             cls._register_linux_autostart(physical_storage, target_mount)
+            mounted_ok = True
 
         else:
             raise RuntimeError(f"Unsupported operating system: {os_type}")
@@ -130,12 +180,13 @@ class VFSServiceManager:
         if enable_samba and os_type == "linux":
             cls._enable_samba_share(physical_storage)
 
-        # Redirect global StorageManager path to virtual partition
-        StorageManager.set_path(target_mount)
-        print(f"[NeuraFS VFS] Global Storage path redirected -> '{target_mount}'")
+        # Redirect global StorageManager path to virtual partition if mounted successfully
+        if mounted_ok:
+            StorageManager.set_path(target_mount)
+            print(f"[NeuraFS VFS] Global Storage path redirected -> '{target_mount}'")
 
         save_vfs_state({
-            "status": "mounted",
+            "status": "mounted" if mounted_ok else "unmounted",
             "os": os_type,
             "physical_storage": physical_storage,
             "virtual_target": target_mount,
@@ -143,7 +194,10 @@ class VFSServiceManager:
             "mode": "read_write"
         })
 
-        print("[NeuraFS VFS] Status: MOUNTED (RW) & PERSISTED ACROSS REBOOTS ✅\n")
+        if mounted_ok:
+            print(f"[NeuraFS VFS] Status: MOUNTED ({target_mount}) (RW) & PERSISTED ACROSS REBOOTS [OK]\n")
+        else:
+            print("[NeuraFS VFS] Status: MOUNT IN PROGRESS OR SUBST BOUND [OK]\n")
 
     @classmethod
     def umount(cls, target: Optional[str] = None) -> None:
@@ -169,13 +223,14 @@ class VFSServiceManager:
         print(f"[NeuraFS VFS] Global Storage path restored -> '{default_storage}'")
 
         clear_vfs_state()
-        print(f"[NeuraFS VFS] Status: UNMOUNTED & PERSISTENCE REMOVED ✅\n")
+        print(f"[NeuraFS VFS] Status: UNMOUNTED & PERSISTENCE REMOVED [OK]\n")
 
     @classmethod
     def status(cls) -> None:
         """Displays status of the VFS virtual partition and persistence engine."""
         state = load_vfs_state()
         os_type = detect_os()
+        mounted = cls.is_mounted()
 
         print("\n===================================================")
         print("          NeuraFS Virtual File System Status       ")
@@ -183,14 +238,16 @@ class VFSServiceManager:
         print(f" • Host Operating System : {os_type.upper()}")
         print(f" • Active Driver Engine  : {'WinFSP / Windows VFS' if os_type == 'windows' else 'FUSE Kernel Module'}")
 
-        if state and state.get("status") == "mounted":
-            print(f" • Mount Status          : MOUNTED ✅ (Read/Write)")
-            print(f" • Virtual Partition     : {state.get('virtual_target')}")
-            print(f" • Physical Storage      : {state.get('physical_storage')}")
+        if mounted:
+            v_target = state.get("virtual_target") or StorageManager.get_path()
+            p_storage = state.get("physical_storage") or str(Path.home() / ".neurafs" / "storage")
+            print(f" • Mount Status          : MOUNTED [OK] (Read/Write)")
+            print(f" • Virtual Partition     : {v_target}")
+            print(f" • Physical Storage      : {p_storage}")
             print(f" • Boot Autostart        : ACTIVE (Persisted via {'Task Scheduler' if os_type == 'windows' else 'systemd'})")
-            print(f" • Samba VFS Share       : {'ENABLED ✅' if state.get('samba_enabled') else 'DISABLED'}")
+            print(f" • Samba VFS Share       : {'ENABLED [OK]' if state.get('samba_enabled') else 'DISABLED'}")
         else:
-            print(f" • Mount Status          : UNMOUNTED ❌")
+            print(f" • Mount Status          : UNMOUNTED [OFFLINE]")
             print(f" • Current Storage Path  : {StorageManager.get_path()}")
         print("===================================================\n")
 
@@ -198,35 +255,40 @@ class VFSServiceManager:
 
     @staticmethod
     def _mount_windows(physical_storage: str, drive_letter: str) -> None:
-        """Spawns background Python daemon process to mount drive permanently."""
+        """Spawns background Python daemon process to mount drive permanently without CMD window."""
+        from neurafs.utils.process import spawn_silent_daemon
+
         python_exe = sys.executable
         driver_script = os.path.join(os.path.dirname(__file__), "drivers", "windows_winfsp.py")
 
-        # Launch detached background process so it survives terminal exit
-        CREATE_NEW_PROCESS_GROUP = 0x00000200
-        DETACHED_PROCESS = 0x00000008
-        proc = subprocess.Popen(
-            [python_exe, driver_script, physical_storage, drive_letter],
-            creationflags=DETACHED_PROCESS | CREATE_NEW_PROCESS_GROUP,
-            close_fds=True
-        )
+        if getattr(sys, "frozen", False):
+            cmd = [python_exe, "_run_winfsp_driver", physical_storage, drive_letter]
+        else:
+            cmd = [python_exe, driver_script, physical_storage, drive_letter]
+
+        proc = spawn_silent_daemon(cmd, detached=True)
         
         # Track VFS process PID for clean unmounting
-        pid_file = Path.home() / ".neurafs" / "run" / "vfs.pid"
-        pid_file.parent.mkdir(parents=True, exist_ok=True)
-        pid_file.write_text(str(proc.pid), encoding="utf-8")
+        if proc and hasattr(proc, "pid"):
+            pid_file = Path.home() / ".neurafs" / "run" / "vfs.pid"
+            pid_file.parent.mkdir(parents=True, exist_ok=True)
+            pid_file.write_text(str(proc.pid), encoding="utf-8")
 
     @staticmethod
     def _umount_windows(drive_letter: str) -> None:
+        from neurafs.utils.process import run_silent_subprocess
+
         VFSServiceManager._kill_vfs_process()
         cmd = ["subst", drive_letter, "/d"] if len(drive_letter) == 2 else ["net", "use", drive_letter, "/delete", "/y"]
-        subprocess.run(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        run_silent_subprocess(cmd)
     
     @staticmethod
     def _mount_linux(physical_storage: str, mount_point: str) -> None:
+        from neurafs.utils.process import spawn_silent_daemon
+
         python_exe = sys.executable
         driver_script = os.path.join(os.path.dirname(__file__), "drivers", "linux_fuse.py")
-        proc = subprocess.Popen([python_exe, driver_script, physical_storage, mount_point])
+        proc = spawn_silent_daemon([python_exe, driver_script, physical_storage, mount_point])
         
         # Track Linux FUSE process PID
         pid_file = Path.home() / ".neurafs" / "run" / "vfs.pid"
@@ -235,18 +297,22 @@ class VFSServiceManager:
 
     @staticmethod
     def _umount_linux(mount_point: str) -> None:
+        from neurafs.utils.process import run_silent_subprocess
+
         VFSServiceManager._kill_vfs_process()
-        subprocess.run(["fusermount", "-u", mount_point], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        run_silent_subprocess(["fusermount", "-u", mount_point])
         
     @staticmethod
     def _kill_vfs_process() -> None:
         """Terminates active VFS background daemon process via tracked PID."""
+        from neurafs.utils.process import run_silent_subprocess
+
         pid_file = Path.home() / ".neurafs" / "run" / "vfs.pid"
         if pid_file.exists():
             try:
                 pid = int(pid_file.read_text().strip())
                 if sys.platform == "win32":
-                    subprocess.run(["taskkill", "/F", "/PID", str(pid)], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+                    run_silent_subprocess(["taskkill", "/F", "/PID", str(pid)])
                 else:
                     import signal
                     os.kill(pid, signal.SIGTERM)
@@ -260,29 +326,34 @@ class VFSServiceManager:
     @staticmethod
     def _register_windows_autostart(physical_storage: str, drive_letter: str) -> None:
         """Smart cleanup of old tasks before registering a clean, single Task Scheduler job."""
+        from neurafs.utils.process import run_silent_subprocess
+
         task_name = "NeuraFS_VFS_AutoMount"
 
-        # 1. Прво задолжително се бришат сите постоечки/застарени NeuraFS задачи
         VFSServiceManager._remove_windows_autostart()
 
-        # 2. Се регистрира само најновата и свежа задача
-        python_exe = sys.executable
-        driver_script = os.path.join(os.path.dirname(__file__), "drivers", "windows_winfsp.py")
-        action = f'"{python_exe}" "{driver_script}" "{physical_storage}" "{drive_letter}"'
+        if getattr(sys, "frozen", False):
+            action = f'"{sys.executable}" _run_winfsp_driver "{physical_storage}" "{drive_letter}"'
+        else:
+            python_exe = sys.executable
+            driver_script = os.path.join(os.path.dirname(__file__), "drivers", "windows_winfsp.py")
+            action = f'"{python_exe}" "{driver_script}" "{physical_storage}" "{drive_letter}"'
 
         cmd = [
             "schtasks", "/create", "/tn", task_name,
             "/tr", action, "/sc", "onlogon", "/f"
         ]
-        subprocess.run(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        run_silent_subprocess(cmd)
         print(f"[NeuraFS Persistence] Cleaned old tasks and registered new Task Scheduler job '{task_name}'")
 
     @staticmethod
     def _remove_windows_autostart() -> None:
         """Forcibly removes any existing NeuraFS Task Scheduler jobs."""
+        from neurafs.utils.process import run_silent_subprocess
+
         task_name = "NeuraFS_VFS_AutoMount"
         cmd = ["schtasks", "/delete", "/tn", task_name, "/f"]
-        subprocess.run(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        run_silent_subprocess(cmd)
 
     # --- Linux Methods ---
     

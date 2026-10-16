@@ -74,16 +74,15 @@ def start_web(host: str = "127.0.0.1", port: int = 3000, daemon: bool = False) -
     env["PORT"] = str(port)
 
     cmd = ["node", APP_JS]
-    creation_flags = subprocess.CREATE_NEW_PROCESS_GROUP if sys.platform == "win32" else 0
-
     if daemon:
-        proc = subprocess.Popen(
+        from neurafs.utils.process import spawn_silent_daemon
+
+        proc = spawn_silent_daemon(
             cmd,
             cwd=WEB_DIR,
             env=env,
             stdout=subprocess.DEVNULL,
             stderr=subprocess.DEVNULL,
-            creationflags=creation_flags,
         )
         WebManager.write_pid(proc.pid)
         print(f"[NeuraFS Web] Background server launched on http://{host}:{port} (PID: {proc.pid})")
@@ -153,7 +152,7 @@ def status_web() -> None:
         cpu_pct = proc.cpu_percent(interval=0.1)
         uptime = round(time.time() - proc.create_time(), 1)
 
-        print("\n[NeuraFS Web Status] Status: RUNNING ✅")
+        print("\n[NeuraFS Web Status] Status: RUNNING [OK]")
         print(f" • PID        : {pid}")
         print(f" • RAM Usage  : {mem_mb} MB")
         print(f" • CPU Usage  : {cpu_pct}%")

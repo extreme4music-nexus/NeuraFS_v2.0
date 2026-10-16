@@ -47,6 +47,10 @@ class StorageEventHandler(FileSystemEventHandler if WATCHDOG_AVAILABLE else obje
             return True
         if path.suffix.lower() in self.IGNORED_EXTENSIONS:
             return True
+        abs_p = str(path.absolute())
+        from neurafs.core.modules.state_db import StateManager
+        if os.path.exists(f"{abs_p}.hcs") or StateManager.is_processed(abs_p):
+            return True
         return False
 
     def _wait_until_settled(self, file_path: str, timeout: int = 30) -> bool:
@@ -138,7 +142,9 @@ class NeuraFSWatcher:
 
     @classmethod
     def start_daemon(cls) -> bool:
-        """Launches Watcher in a detached background daemon process."""
+        """Launches Watcher in a detached background daemon process without CMD window."""
+        from neurafs.utils.process import spawn_silent_daemon
+
         if not WATCHDOG_AVAILABLE:
             print("⚠️  [NeuraFS Watcher] 'watchdog' package missing. Run: pip install watchdog")
             return False
@@ -148,35 +154,28 @@ class NeuraFSWatcher:
             return True
 
         PID_FILE.parent.mkdir(parents=True, exist_ok=True)
-        python_exe = sys.executable
-        cmd = [python_exe, "-m", "neurafs.core.modules.watcher"]
+        if getattr(sys, "frozen", False):
+            cmd = [sys.executable, "_run_watcher_daemon"]
+        else:
+            cmd = [sys.executable, "-m", "neurafs.core.modules.watcher"]
 
-        kwargs = {}
-        if sys.platform == "win32":
-            CREATE_NO_WINDOW = 0x08000000
-            kwargs["creationflags"] = subprocess.CREATE_NEW_PROCESS_GROUP | subprocess.DETACHED_PROCESS
-
-        proc = subprocess.Popen(
-            cmd,
-            stdout=subprocess.DEVNULL,
-            stderr=subprocess.DEVNULL,
-            stdin=subprocess.DEVNULL,
-            **kwargs
-        )
+        proc = spawn_silent_daemon(cmd, detached=True)
         PID_FILE.write_text(str(proc.pid))
-        print(f"👁️  [NeuraFS Watcher] Launched background watcher daemon (PID: {proc.pid})")
+        print(f"[NeuraFS Watcher] Launched background watcher daemon (PID: {proc.pid})")
         return True
 
     @classmethod
     def stop_daemon(cls) -> bool:
         """Stops background Watcher daemon process."""
+        from neurafs.utils.process import run_silent_subprocess
+
         pid = cls._get_pid()
         if not pid:
             return True
 
         try:
             if sys.platform == "win32":
-                subprocess.run(["taskkill", "/F", "/PID", str(pid)], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+                run_silent_subprocess(["taskkill", "/F", "/PID", str(pid)])
             else:
                 os.kill(pid, signal.SIGTERM)
         except Exception:
@@ -192,7 +191,6 @@ class NeuraFSWatcher:
         return True
 
     @classmethod
-    @classmethod
     def run_forever(cls):
         """Blocking execution loop meant for detached background daemon process."""
         from neurafs.core.storage import StorageManager
@@ -203,16 +201,21 @@ class NeuraFSWatcher:
         if not WATCHDOG_AVAILABLE:
             sys.exit(1)
 
-        if not os.path.exists(target_path):
+        try:
             os.makedirs(target_path, exist_ok=True)
+        except Exception:
+            pass
 
         # Start Queue Processing Loop
         QueueManager.start_worker()
 
         event_handler = StorageEventHandler()
         observer = Observer()
-        observer.schedule(event_handler, path=target_path, recursive=True)
-        observer.start()
+        try:
+            observer.schedule(event_handler, path=target_path, recursive=True)
+            observer.start()
+        except Exception as e:
+            print(f"⚠️  [NeuraFS Watcher] Failed to schedule path '{target_path}': {e}")
 
         try:
             while True:

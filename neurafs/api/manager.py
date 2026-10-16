@@ -72,26 +72,28 @@ def start_api(
     app_module = "neurafs.api.server:app"
 
     if daemon:
-        cmd = [
-            sys.executable,
-            "-m",
-            "uvicorn",
-            app_module,
-            "--host",
-            host,
-            "--port",
-            str(port),
-        ]
-        if reload:
-            cmd.append("--reload")
+        if getattr(sys, "frozen", False):
+            cmd = [sys.executable, "_run_api_server", "--host", host, "--port", str(port)]
+        else:
+            cmd = [
+                sys.executable,
+                "-m",
+                "uvicorn",
+                app_module,
+                "--host",
+                host,
+                "--port",
+                str(port),
+            ]
+            if reload:
+                cmd.append("--reload")
 
-        creation_flags = subprocess.CREATE_NEW_PROCESS_GROUP if sys.platform == "win32" else 0
+        from neurafs.utils.process import spawn_silent_daemon
 
-        proc = subprocess.Popen(
+        proc = spawn_silent_daemon(
             cmd,
             stdout=subprocess.DEVNULL,
             stderr=subprocess.DEVNULL,
-            creationflags=creation_flags,
         )
         APIManager.write_pid(proc.pid)
         print(f"[NeuraFS API] Background server launched on http://{host}:{port} (PID: {proc.pid})")
@@ -158,7 +160,7 @@ def status_api() -> None:
         cpu_pct = proc.cpu_percent(interval=0.1)
         uptime = round(time.time() - proc.create_time(), 1)
 
-        print("\n[NeuraFS API Status] Status: RUNNING ✅")
+        print("\n[NeuraFS API Status] Status: RUNNING [OK]")
         print(f" • PID        : {pid}")
         print(f" • RAM Usage  : {mem_mb} MB")
         print(f" • CPU Usage  : {cpu_pct}%")

@@ -94,14 +94,18 @@ class DACCodec(BaseNeuralCodec):
         code_shapes = []
 
         for chunk in chunks:
-            mono = pcm_to_mono_batch(chunk["pcm_data"])
-            wav = torch.from_numpy(mono).float().unsqueeze(0).unsqueeze(0).to(device)
+            pcm_chunk = chunk["pcm_data"]
+            if pcm_chunk.ndim == 1:
+                wav = torch.from_numpy(pcm_chunk).float().unsqueeze(0).unsqueeze(0).to(device)
+            else:
+                wav = torch.from_numpy(pcm_chunk).float().unsqueeze(1).to(device)
+
             with torch.no_grad():
                 x = model.preprocess(wav, sample_rate)
                 # encode returns z, codes, latents, commitment_loss, codebook_loss
                 _z, codes, *_rest = model.encode(x, n_quantizers=n_q)
-                # codes: [B, n_q, T]
-                codes_np = codes[0].detach().cpu().numpy().astype(np.int16)
+                # codes: [1, n_q, T] for mono or [C, n_q, T] for multi-channel
+                codes_np = codes.detach().cpu().numpy().astype(np.int16)
 
             blob = pack_codes(codes_np)
             blob_len = len(blob)
@@ -157,22 +161,24 @@ class DACCodec(BaseNeuralCodec):
 
         for unit, blob in ordered:
             codes_np = unpack_codes(blob)
-            codes = torch.from_numpy(codes_np.astype(np.int64)).unsqueeze(0).to(device)
+            codes = torch.from_numpy(codes_np.astype(np.int64)).to(device)
+            if codes.dim() == 2:
+                codes = codes.unsqueeze(0)
             with torch.no_grad():
                 # Map codes → quantized latents → waveform
                 z = model.quantizer.from_codes(codes)[0]
                 y = model.decode(z)
-                # y: [B, 1, T]
-                mono = y[0, 0].detach().cpu().numpy().astype(np.float32)
+                # y: [1, 1, T] for mono or [C, 1, T] for multi-channel
+                pcm_buf = y.squeeze(1).detach().cpu().numpy().astype(np.float32)
 
             target_len = int(unit.get("num_samples") or 0)
-            if target_len > 0 and mono.shape[-1] != target_len:
-                if mono.shape[-1] > target_len:
-                    mono = mono[:target_len]
+            if target_len > 0 and pcm_buf.shape[-1] != target_len:
+                if pcm_buf.shape[-1] > target_len:
+                    pcm_buf = pcm_buf[..., :target_len]
                 else:
-                    mono = np.pad(mono, (0, target_len - mono.shape[-1]))
+                    pcm_buf = np.pad(pcm_buf, ((0, 0), (0, target_len - pcm_buf.shape[-1])))
 
-            pcm_chunks.append(ensure_channels_shape(mono, channels))
+            pcm_chunks.append(ensure_channels_shape(pcm_buf, channels))
 
         if not pcm_chunks:
             return np.zeros((channels, 0), dtype=np.float32)

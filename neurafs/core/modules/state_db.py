@@ -160,6 +160,27 @@ class StateManager:
             return recovered_count
 
     @classmethod
+    def is_processed(cls, original_path: str) -> bool:
+        """Checks if file has already been processed into a completed HCS container."""
+        cls.init_db()
+        abs_path = os.path.abspath(original_path)
+        with cls._get_connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute("SELECT status, hcs_path FROM files_state WHERE original_path = ?", (abs_path,))
+            row = cursor.fetchone()
+            if row:
+                status = row["status"]
+                hcs_path = row["hcs_path"]
+                if status in ("COMPLETED_HCS", "PROCESSED"):
+                    return True
+                if hcs_path and os.path.exists(hcs_path):
+                    return True
+        hcs_direct = f"{abs_path}.hcs"
+        if os.path.exists(hcs_direct):
+            return True
+        return False
+
+    @classmethod
     def get_all_records(cls) -> List[Dict[str, Any]]:
         """Returns all tracked records for internal query auditing."""
         cls.init_db()

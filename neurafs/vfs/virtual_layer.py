@@ -16,7 +16,8 @@ class VFSVirtualLayer:
         if not os.path.exists(physical_dir):
             return []
 
-        # Read state DB records to map original metadata
+        from neurafs.core.container import HCSContainer
+
         records = {r["original_path"]: r for r in StateManager.get_all_records()}
         virtual_items = []
         seen_files = set()
@@ -31,19 +32,40 @@ class VFSVirtualLayer:
 
             # 2. Handle Completed .hcs Containers (Masking)
             if name.endswith(".hcs"):
-                orig_name = name[:-4]  # Remove '.hcs' -> 'song.wav'
-                orig_path = abs_path[:-4]
-                rec = records.get(orig_path)
+                # E.g. 'song.wav.hcs' -> 'song.wav', or 'song.hcs' -> original name from manifest
+                rec = records.get(abs_path[:-4])
+                manifest = None
+                orig_name = None
+                orig_size = 0
+                codec_id = "dac"
+
+                try:
+                    with open(abs_path, "rb") as f:
+                        manifest, _ = HCSContainer.unpack(f.read())
+                    orig_info = manifest.get("original", {})
+                    neural_info = manifest.get("neural", {})
+                    orig_name = orig_info.get("name")
+                    orig_size = orig_info.get("size", 0)
+                    codec_id = neural_info.get("codec") or neural_info.get("architecture") or "dac"
+                except Exception:
+                    pass
+
+                if not orig_name:
+                    orig_name = name[:-4]
+
+                if not orig_size and rec:
+                    orig_size = rec.get("file_size", 0)
+                if not orig_size:
+                    orig_size = entry.stat().st_size
 
                 if orig_name not in seen_files:
-                    # Spoof attribute: Tell OS this is a WAV with its ORIGINAL size
-                    spoofed_size = rec["file_size"] if rec and rec["file_size"] > 0 else entry.stat().st_size
                     virtual_items.append({
                         "name": orig_name,
                         "is_dir": False,
-                        "size": spoofed_size,
+                        "size": orig_size,
                         "physical_path": abs_path,
-                        "type": "HCS_VIRTUAL"
+                        "type": "HCS_VIRTUAL",
+                        "codec": codec_id,
                     })
                     seen_files.add(orig_name)
                 continue
@@ -74,6 +96,8 @@ class VFSVirtualLayer:
     @classmethod
     def get_virtual_attributes(cls, physical_root: str, virtual_rel_path: str) -> Optional[Dict[str, Any]]:
         """Intercepts file attribute queries (getattr/stat) to spoof original file metadata."""
+        from neurafs.core.container import HCSContainer
+
         clean_rel = virtual_rel_path.lstrip("/\\")
         if not clean_rel:
             st = os.stat(physical_root)
@@ -82,20 +106,42 @@ class VFSVirtualLayer:
         phys_direct = os.path.join(physical_root, clean_rel)
         phys_hcs = f"{phys_direct}.hcs"
 
-        # Scenario A: File is COMPLETED_HCS (.hcs exists physically)
+        # Check direct .hcs path or append .hcs
+        target_hcs = None
         if os.path.exists(phys_hcs):
+            target_hcs = phys_hcs
+        elif phys_direct.endswith(".hcs") and os.path.exists(phys_direct):
+            target_hcs = phys_direct
+
+        # Scenario A: File is COMPLETED_HCS (.hcs exists physically)
+        if target_hcs:
             records = {r["original_path"]: r for r in StateManager.get_all_records()}
             rec = records.get(os.path.abspath(phys_direct))
-            hcs_st = os.stat(phys_hcs)
+            hcs_st = os.stat(target_hcs)
+            orig_size = 0
+            codec_id = "dac"
 
-            # Return original uncompressed size from state.db
-            spoofed_size = rec["file_size"] if rec and rec["file_size"] > 0 else hcs_st.st_size
+            try:
+                with open(target_hcs, "rb") as f:
+                    manifest, _ = HCSContainer.unpack(f.read())
+                orig_size = manifest.get("original", {}).get("size", 0)
+                neural_info = manifest.get("neural", {})
+                codec_id = neural_info.get("codec") or neural_info.get("architecture") or "dac"
+            except Exception:
+                pass
+
+            if not orig_size and rec:
+                orig_size = rec.get("file_size", 0)
+            if not orig_size:
+                orig_size = hcs_st.st_size
+
             return {
-                "size": spoofed_size,
+                "size": orig_size,
                 "is_dir": False,
                 "mtime": hcs_st.st_mtime,
-                "physical_path": phys_hcs,
-                "type": "HCS_VIRTUAL"
+                "physical_path": target_hcs,
+                "type": "HCS_VIRTUAL",
+                "codec": codec_id,
             }
 
         # Scenario B: File is in PROCESSING or UNCONVERTED state
