@@ -123,10 +123,24 @@ class ServiceOrchestrator:
             results["watcher"] = f"FAILED ❌ ({err})"
             print(f" ⚠️ Watcher Error: {err}")
 
-        # Register unified boot persistence
-        cls.enable_autostart()
+        # Register unified boot persistence and include the outcome in the report.
+        try:
+            persistence_enabled = cls.enable_autostart()
+            results["autostart"] = "REGISTERED" if persistence_enabled else "NOT REGISTERED"
+        except Exception as err:
+            results["autostart"] = f"FAILED ({err})"
+            print(f"[NeuraFS Autostart Error] {err}")
 
-        print("\n✨ All NeuraFS background services active & Master Boot Persistence registered!")
+        failed_services = [
+            name for name, status in results.items()
+            if status.startswith("FAILED")
+        ]
+        if failed_services:
+            print("[START] Startup completed with failures: " + ", ".join(failed_services))
+        elif results["autostart"] != "REGISTERED":
+            print("[START] NeuraFS services started. Boot persistence was not registered.")
+        else:
+            print("[START] All NeuraFS services active and boot persistence registered.")
         return results
 
     @classmethod
