@@ -78,6 +78,28 @@ def test_end_to_end_encoding_decoding(dummy_wav_file):
                 os.remove(path)
 
 
+def test_resynthesis_trims_padding_to_original_sample_count(monkeypatch):
+    """Full-file decode honors the source length after codecs pad their final chunk."""
+    class PaddedCodec:
+        def decode_media(self, **kwargs):
+            return np.ones((2, 110250), dtype=np.float32)
+
+    import neurafs.core.engine as engine_module
+
+    monkeypatch.setattr(engine_module, "get_codec", lambda _codec: PaddedCodec())
+    decoded = NeuraFSEngine.resynthesize_audio_from_units(
+        chunk_units=[],
+        blob_list=[],
+        channels=2,
+        sample_rate=44100,
+        precision=PrecisionMode.STANDARD_16,
+        neural_info={"codec": "test"},
+        num_samples=11025,
+    )
+
+    assert decoded.shape == (2, 11025)
+
+
 def test_mono_stereo_channel_preservation():
     """Verifies that mono and stereo audio files retain exact channel layouts during encoding & decoding."""
     sample_rate = 44100

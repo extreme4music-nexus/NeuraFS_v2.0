@@ -87,6 +87,7 @@ class NeuraFSEngine:
                 sample_rate=sample_rate,
                 precision=precision,
                 neural_info=manifest["neural"],
+                num_samples=int(pcm_data.shape[-1]),
             )
             metrics = compute_metrics(pcm_data, recon_pcm, sample_rate)
             manifest["metrics"].update(metrics)
@@ -108,6 +109,7 @@ class NeuraFSEngine:
         num_chunks: Optional[int] = None,
         neural_info: Optional[Dict[str, Any]] = None,
         codec: Optional[str] = None,
+        num_samples: Optional[int] = None,
         **kwargs: Any,
     ) -> np.ndarray:
         """Resynthesize full PCM by dispatching to the codec recorded in neural_info."""
@@ -124,7 +126,7 @@ class NeuraFSEngine:
         bound_codec = info.get("codec") or _architecture_to_codec(info.get("architecture"))
         codec_id = bound_codec or codec or config.DEFAULT_CODEC
         agent = get_codec(str(codec_id))
-        return agent.decode_media(
+        pcm = agent.decode_media(
             chunk_units=chunk_units,
             blob_list=blob_list,
             channels=channels,
@@ -134,6 +136,9 @@ class NeuraFSEngine:
             num_chunks=num_chunks or info.get("num_chunks"),
             **kwargs,
         )
+        if num_samples is not None:
+            pcm = pcm[..., : max(0, int(num_samples))]
+        return pcm
 
 
 def _architecture_to_codec(architecture: Optional[str]) -> Optional[str]:

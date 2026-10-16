@@ -284,6 +284,7 @@ async def stream_neural_file(path: str = Query(..., description="Relative path t
                 num_subbands=num_subbands,
                 num_chunks=num_chunks,
                 neural_info=neural_info,
+                num_samples=manifest.get("original", {}).get("samples"),
             )
 
             audio_pcm16 = (np.clip(pcm_float, -1.0, 1.0) * 32767.0).astype(np.int16)

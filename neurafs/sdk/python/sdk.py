@@ -61,6 +61,7 @@ class NeuraFSSDK:
             num_subbands=num_subbands,
             num_chunks=num_chunks,
             neural_info=neural_info,
+            num_samples=orig_info.get("samples"),
         )
 
         audio_pcm16 = (np.clip(pcm_float, -1.0, 1.0) * 32767.0).astype("int16")
