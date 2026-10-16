@@ -50,3 +50,24 @@ def test_handle_samba_disable(mock_remove, mock_avail, capsys):
     captured = capsys.readouterr()
     assert "Disabled & Removed" in captured.out
     assert mock_remove.called
+
+def test_windows_samba_status_avoids_unix_config_path(monkeypatch, capsys):
+    class ForbiddenPath:
+        def exists(self):
+            raise AssertionError("unsupported smb.conf path was accessed")
+
+        def read_text(self, **kwargs):
+            raise AssertionError("unsupported smb.conf path was read")
+
+    monkeypatch.setattr(SambaManager, "is_available", classmethod(lambda cls: False))
+    monkeypatch.setattr(SambaManager, "SMB_CONF_PATH", ForbiddenPath())
+
+    assert SambaManager.is_share_active() is False
+    details = SambaManager.get_share_details()
+    assert details["active"] is False
+    assert details["c_plugin_active"] is False
+
+    handle_samba(argparse.Namespace(action="status"))
+    output = capsys.readouterr().out
+    assert "UNAVAILABLE" in output
+    assert "Share Status  : INACTIVE" in output

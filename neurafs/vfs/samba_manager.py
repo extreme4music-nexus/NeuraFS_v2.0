@@ -27,7 +27,9 @@ class SambaManager:
 
     @classmethod
     def is_share_active(cls) -> bool:
-        """Checks if NeuraFS share block exists inside smb.conf."""
+        """Checks if NeuraFS share block exists inside smb.conf on supported hosts."""
+        if not cls.is_available():
+            return False
         if cls.SMB_CONF_PATH.exists():
             try:
                 content = cls.SMB_CONF_PATH.read_text(encoding="utf-8")
@@ -99,15 +101,16 @@ class SambaManager:
     @classmethod
     def get_share_details(cls) -> Dict[str, Any]:
         """Parses smb.conf and returns active NeuraFS share configuration."""
+        available = cls.is_available()
         details = {
             "active": False,
             "share_name": cls.SHARE_NAME,
             "path": None,
             "read_only": None,
             "guest_ok": None,
-            "c_plugin_active": cls._check_c_plugin_exists()
+            "c_plugin_active": cls._check_c_plugin_exists() if available else False
         }
-        if not cls.SMB_CONF_PATH.exists():
+        if not available or not cls.SMB_CONF_PATH.exists():
             return details
 
         try:
@@ -145,6 +148,8 @@ class SambaManager:
     @classmethod
     def remove_share(cls, reload_service: bool = True) -> bool:
         """Cleanly removes NeuraFS share block from smb.conf without touching other shares."""
+        if not cls.is_available():
+            return False
         if not cls.SMB_CONF_PATH.exists() or not os.access(cls.SMB_CONF_PATH, os.W_OK):
             return False
 
