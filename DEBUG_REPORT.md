@@ -23,3 +23,9 @@ The earlier low-fidelity and expansion measurements are isolated to the optional
 ### Safe repository-suite verification
 
 Ran the repository tests excluding only `test_vfs_file_illusion_and_watchdog_immunity`, because that test writes records into the user's global `~/.neurafs/state.db`. Result: `17 passed, 1 deselected` in 166.89 seconds. The three warnings were PyTorch's upstream `torch.nn.utils.weight_norm` deprecation warnings. Mocked service-orchestrator, mount-state, API health, and Samba tests all passed; the DAC end-to-end and channel-layout tests passed.
+
+### Fix 12 — wait for API readiness before reporting startup
+
+**Changed:** Background API startup now writes combined output to `~/.neurafs/logs/api.log`, waits for the API's `/health` response, checks for early child exit, and records the PID only after readiness. Failed startup terminates the spawned process, clears PID state, and includes the log path and error in the exception. Existing PID state is treated as running only when the requested API endpoint responds.
+
+**Verification:** Four isolated tests passed (`4 passed in 10.49s`): health response validation, wildcard/IPv6 probe URL construction, PID creation only after readiness, and failed-start process/PID cleanup. Python compilation and `git diff --check` passed. Tests mocked subprocess creation and did not start or modify actual NeuraFS services.

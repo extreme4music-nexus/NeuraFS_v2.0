@@ -1,5 +1,6 @@
 """NeuraFS API Lifecycle & Process Manager for CLI."""
 
+import json
 import os
 import sys
 import time
@@ -8,6 +9,60 @@ import psutil
 import uvicorn
 from neurafs.core.storage import StorageManager
 from pathlib import Path
+from urllib.request import urlopen
+
+API_START_TIMEOUT = 10.0
+
+
+def _health_url(host: str, port: int) -> str:
+    probe_host = "127.0.0.1" if host in {"0.0.0.0", "::"} else host
+    if ":" in probe_host and not probe_host.startswith("["):
+        probe_host = f"[{probe_host}]"
+    return f"http://{probe_host}:{port}/health"
+
+
+def _api_endpoint_is_ready(host: str, port: int) -> bool:
+    try:
+        with urlopen(_health_url(host, port), timeout=0.5) as response:
+            payload = json.loads(response.read().decode("utf-8"))
+            return response.status == 200 and payload.get("status") == "ok"
+    except Exception:
+        return False
+
+
+def _read_api_log_tail(log_file: Path) -> str:
+    try:
+        return "".join(log_file.read_text(encoding="utf-8", errors="replace").splitlines(True)[-20:]).strip()
+    except OSError:
+        return ""
+
+
+def _wait_for_api_ready(proc, host: str, port: int, log_file: Path) -> None:
+    deadline = time.monotonic() + API_START_TIMEOUT
+    while True:
+        exit_code = proc.poll()
+        if exit_code is not None:
+            detail = _read_api_log_tail(log_file)
+            message = f"API process exited before its health endpoint became ready (exit code {exit_code})"
+            if detail:
+                message += f":\n{detail}"
+            raise RuntimeError(message)
+        if _api_endpoint_is_ready(host, port):
+            return
+        if time.monotonic() >= deadline:
+            raise RuntimeError(f"API health endpoint did not respond within {API_START_TIMEOUT:g} seconds")
+        time.sleep(0.2)
+
+
+def _terminate_started_process(proc) -> None:
+    if proc is None or proc.poll() is not None:
+        return
+    proc.terminate()
+    try:
+        proc.wait(timeout=3.0)
+    except subprocess.TimeoutExpired:
+        proc.kill()
+        proc.wait(timeout=3.0)
 
 
 class APIManager:
@@ -66,8 +121,12 @@ def start_api(
     """Starts the NeuraFS FastAPI server in foreground or background mode."""
     active_pid = APIManager.get_running_pid()
     if active_pid:
-        print(f"[NeuraFS API] Server is already running (PID: {active_pid}).")
-        return
+        if _api_endpoint_is_ready(host, port):
+            print(f"[NeuraFS API] Server is already running (PID: {active_pid}).")
+            return
+        raise RuntimeError(
+            f"API process {active_pid} is tracked but {_health_url(host, port)} is not responding."
+        )
 
     app_module = "neurafs.api.server:app"
 
@@ -90,13 +149,26 @@ def start_api(
 
         from neurafs.utils.process import spawn_silent_daemon
 
-        proc = spawn_silent_daemon(
-            cmd,
-            stdout=subprocess.DEVNULL,
-            stderr=subprocess.DEVNULL,
-        )
-        APIManager.write_pid(proc.pid)
-        print(f"[NeuraFS API] Background server launched on http://{host}:{port} (PID: {proc.pid})")
+        log_file = Path.home() / ".neurafs" / "logs" / "api.log"
+        log_file.parent.mkdir(parents=True, exist_ok=True)
+        proc = None
+        try:
+            with log_file.open("a", encoding="utf-8") as log_stream:
+                proc = spawn_silent_daemon(
+                    cmd,
+                    stdout=log_stream,
+                    stderr=subprocess.STDOUT,
+                )
+            _wait_for_api_ready(proc, host, port, log_file)
+            APIManager.write_pid(proc.pid)
+        except Exception as err:
+            _terminate_started_process(proc)
+            APIManager.clear_pid()
+            raise RuntimeError(
+                f"Background API server failed to start. Log: {log_file}. {err}"
+            ) from err
+
+        print(f"[NeuraFS API] Background server ready on http://{host}:{port} (PID: {proc.pid})")
     else:
         print(f"[NeuraFS API] Starting server on http://{host}:{port}...")
         uvicorn.run(app_module, host=host, port=port, reload=reload)
