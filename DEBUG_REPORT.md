@@ -29,3 +29,7 @@ Ran the repository tests excluding only `test_vfs_file_illusion_and_watchdog_imm
 **Changed:** Background API startup now writes combined output to `~/.neurafs/logs/api.log`, waits for the API's `/health` response, checks for early child exit, and records the PID only after readiness. Failed startup terminates the spawned process, clears PID state, and includes the log path and error in the exception. Existing PID state is treated as running only when the requested API endpoint responds.
 
 **Verification:** Four isolated tests passed (`4 passed in 10.49s`): health response validation, wildcard/IPv6 probe URL construction, PID creation only after readiness, and failed-start process/PID cleanup. Python compilation and `git diff --check` passed. Tests mocked subprocess creation and did not start or modify actual NeuraFS services.
+
+### Prior repairs confirmed in the Z: checkout
+
+Before continuing with the audio and API-manager issues, the Z: branch was checked against the C: repair log. The existing Z: history already contains the same first nine fixes; no duplicate patching was needed: `235022f` installer path independence, `e7fd815` Windows-safe installer output, `ed7f887` API health route, `7af447f` declared web dependencies, `d57d6c9` web readiness/logging, `84ba94e` truthful orchestration status, `14a4b8a` verified VFS mount state, `f6c587d` truthful VFS autostart status, and `1ea2d3b` Samba host guard. The C: copy was not modified.
