@@ -142,7 +142,7 @@ def build_and_install():
     if os.path.exists(spec_file):
         os.remove(spec_file)
 
-    print(f"\n✨ NeuraFS v{NEURAFS_VERSION} successfully installed to C:\\Program Files\\NeuraFS\\")
+    print(f"\n NeuraFS v{NEURAFS_VERSION} successfully installed to C:\\Program Files\\NeuraFS\\")
 
 
 def uninstall():
@@ -207,7 +207,7 @@ def uninstall():
     with open(log_file, "w", encoding="utf-8") as f:
         f.writelines(log_entries)
 
-    print(f"\n✨ NeuraFS completely uninstalled. Log: {log_file}")
+    print(f"\n NeuraFS completely uninstalled. Log: {log_file}")
 
 
 def main():
