@@ -29,3 +29,6 @@ include = ["neurafs*"]
 dac = ["descript-audio-codec"]
 encodec = ["encodec"]
 codecs = ["descript-audio-codec", "encodec"]
+
+[tool.setuptools.package-data]
+neurafs = ["web/*.js", "web/public/*", "sdk/node/*.js", "package.json", "package-lock.json"]

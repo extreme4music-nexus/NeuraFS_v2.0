@@ -101,3 +101,17 @@ Added `CROSS_PLATFORM_ROADMAP.md` to define the staged Windows/Linux/macOS readi
 **Reporting defect:** Despite the returned startup result identifying VFS and Web failures, `handle_start` printed “All NeuraFS background services are active & operational” and returned exit code 0. This contradicts the service orchestrator's partial-failure report.
 
 **Package diagnosis underway:** The failing web require points to a Node SDK JavaScript file present in the source project but apparently omitted from the installed Python wheel. Node dependency resolution from the installed package must also be checked. VFS drive selection will be investigated separately after the web packaging issue.
+
+
+### Web startup diagnosis — wheel omitted the Node SDK
+
+Compared the source checkout with the newly installed wheel: `neurafs/sdk/node/hyper-compress-sdk.js` exists in `Z:\Documents\NeuraFS\neurafs\sdk\node` but is absent from the installed `site-packages\neurafs\sdk\node` path, while the installed web `app.js` is present and requires that relative file. `MANIFEST.in` includes only `neurafs/web`; package metadata has no explicit SDK JavaScript package-data rule. Node resolves Express, Multer and lzma-native only from the user's separate `C:\Users\tonic\node_modules` directory in this environment, so a clean installation cannot rely on that ambient copy. The immediate reproducible web failure is the omitted SDK module; runtime npm dependency installation on clean hosts remains a separate packaging gap.
+
+
+### Fix 13 — include the Node SDK in Python wheel installs
+
+**Changed:** Added setuptools package-data rules and source-manifest inclusion for the web assets, Node SDK JavaScript, and the package's Node manifest/lockfile. This ensures the relative SDK module required by installed `web/app.js` is actually shipped in the Python wheel.
+
+**Verification:** Built a wheel from the Z: source (`neurafs-2.0.0-py3-none-any.whl`, 149,318 bytes) into a temporary directory and verified it contains `neurafs/web/app.js`, `neurafs/web/public/index.html`, `neurafs/sdk/node/hyper-compress-sdk.js`, `neurafs/package.json`, and `neurafs/package-lock.json` (5/5). Force-installed that wheel. `neurafs web start --daemon` reached ready state (PID 28048). HTTP checks passed: web `/health` 200, `/` 200, `/api/fs/tree` 200; API `/health` 200.
+
+**Limitations:** Node resolved Express/Multer/lzma-native from `C:\Users\tonic\node_modules` on this PC. A clean-host setup still needs to install or locate these npm dependencies deliberately; this fix only ships the missing project JS/manifests. The VFS remains unmounted and is investigated separately.

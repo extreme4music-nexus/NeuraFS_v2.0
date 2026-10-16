@@ -1,1 +1,2 @@
 recursive-include neurafs/web *
+recursive-include neurafs/sdk/node *.js
