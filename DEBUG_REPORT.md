@@ -192,3 +192,9 @@ The user approved keeping the working per-user Python install and removing the c
 Attempted the reversible rename `C:\\Windows\\System32\\neurafs` → `neurafs.disabled` with the available escalated command execution. Windows returned `Access to the path is denied`. Python `IsUserAnAdmin()` remains false. Thus the requested system-wide cleanup cannot be performed by this session; no System32 or Program Files files were changed. User approval is already established; the remaining blocker is a Windows administrator token.
 
 Once in an elevated PowerShell, rename the zero-byte shadow, confirm `where.exe neurafs` points to the user Python Scripts executable, then remove only `C:\\Program Files\\NeuraFS` after rechecking that exact directory. Finally run `neurafs --help` and `neurafs status`. Until then, the working full-path CLI remains usable.
+
+### Startup persistence attempt — blocked by Windows Task Scheduler access control
+
+Ran the installed `neurafs service autostart on` command. It detected that this session is not an Administrator and returned without registering the task. To test whether a current-user logon task could be created without elevation, attempted a disposable `NeuraFS_PermissionProbe` task with action `cmd.exe /c exit 0`; `schtasks /create` returned `ERROR: Access is denied` (exit code 1). The task was not created, so no cleanup was needed. This confirms that Task Scheduler creation itself is blocked for this token on this PC; the app's privilege gate is not the sole blocker.
+
+No startup task was registered or modified. NeuraFS services were not stopped or changed by this attempt. Enabling persistence requires running `neurafs service autostart on` in an Administrator terminal (the task's configured action invokes the installed package's `service start` command). Verify with `neurafs service autostart status` and `schtasks /query /tn NeuraFS_Master_Daemon` afterward.
