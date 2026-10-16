@@ -99,6 +99,23 @@ def find_free_windows_drive(requested_drive: Optional[str] = None) -> str:
 
 class VFSServiceManager:
     """Manages VFS driver lifecycle, OS persistence services, and StorageManager integration."""
+
+    @staticmethod
+    def _mount_target_is_visible(os_type: str, target: str) -> bool:
+        if os_type == "windows":
+            drive_path = f"{target.rstrip(':\\')}:\\"
+            return os.path.exists(drive_path) or os.path.isdir(drive_path)
+        return os.path.ismount(target)
+
+    @classmethod
+    def _wait_for_mount(cls, os_type: str, target: str, timeout: float = 3.0) -> bool:
+        deadline = time.monotonic() + timeout
+        while True:
+            if cls._mount_target_is_visible(os_type, target):
+                return True
+            if time.monotonic() >= deadline:
+                return False
+            time.sleep(0.3)
     
     @classmethod
     def is_mounted(cls) -> bool:
@@ -154,16 +171,9 @@ class VFSServiceManager:
             print(f"[NeuraFS VFS] Selected Free Drive  : {target_mount}")
 
             cls._mount_windows(physical_storage, target_mount)
-            cls._register_windows_autostart(physical_storage, target_mount)
-
-            # Check drive visibility
-            drive_check = f"{target_mount}\\"
-            mounted_ok = False
-            for _ in range(10):
-                if os.path.exists(drive_check) or os.path.isdir(drive_check) or os.path.exists(target_mount):
-                    mounted_ok = True
-                    break
-                time.sleep(0.3)
+            mounted_ok = cls._wait_for_mount(os_type, target_mount)
+            if mounted_ok:
+                cls._register_windows_autostart(physical_storage, target_mount)
 
         elif os_type == "linux":
             target_mount = str(Path.home() / "NeuraFS_Drive")
@@ -171,13 +181,14 @@ class VFSServiceManager:
             print(f"[NeuraFS VFS] Selected Mount Point : {target_mount}")
 
             cls._mount_linux(physical_storage, target_mount)
-            cls._register_linux_autostart(physical_storage, target_mount)
-            mounted_ok = True
+            mounted_ok = cls._wait_for_mount(os_type, target_mount)
+            if mounted_ok:
+                cls._register_linux_autostart(physical_storage, target_mount)
 
         else:
             raise RuntimeError(f"Unsupported operating system: {os_type}")
 
-        if enable_samba and os_type == "linux":
+        if enable_samba and os_type == "linux" and mounted_ok:
             cls._enable_samba_share(physical_storage)
 
         # Redirect global StorageManager path to virtual partition if mounted successfully
@@ -194,10 +205,13 @@ class VFSServiceManager:
             "mode": "read_write"
         })
 
-        if mounted_ok:
-            print(f"[NeuraFS VFS] Status: MOUNTED ({target_mount}) (RW) & PERSISTED ACROSS REBOOTS [OK]\n")
-        else:
-            print("[NeuraFS VFS] Status: MOUNT IN PROGRESS OR SUBST BOUND [OK]\n")
+        if not mounted_ok:
+            cls._kill_vfs_process()
+            raise RuntimeError(
+                f"VFS mount did not become visible at {target_mount} within the startup timeout."
+            )
+
+        print(f"[NeuraFS VFS] Status: MOUNTED ({target_mount}) (RW) [OK]\n")
 
     @classmethod
     def umount(cls, target: Optional[str] = None) -> None:
