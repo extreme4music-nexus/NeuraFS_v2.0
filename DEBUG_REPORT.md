@@ -270,3 +270,9 @@ No startup task was registered or modified. NeuraFS services were not stopped or
 **Verification:** Focused VFS/streaming and mount-state tests passed (11 passed). `git diff --check` passed. Reinstalled NeuraFS 2.3.0 from the Z: checkout after post-reboot status confirmed all services offline. A direct callback against the installed module logged a synthetic invalid pointer and returned `0xC0000008` (`STATUS_INVALID_HANDLE`) instead of crashing. A subsequent installed `neurafs status` still reports VFS/API/Web/watcher offline and persistence disabled.
 
 **Limits:** This is a defensive guard and diagnostic, not proof of the native dispatcher race's origin. No `neurafs start` or real mount was run after the change. Python pip continues to warn about pre-existing invalid distribution remnants (`~`, `~eurafs`, `~~urafs`); they were not modified.
+
+### Guarded real-mount retest blocked — 2026-10-20
+
+**Attempt status:** After installing the GetFileInfo guard, a single repeat of the previously requested real `neurafs start` was submitted for verification. Automatic approval review rejected it before process launch because the earlier real WinFSP mount caused a fatal Python CFFI crash and Explorer/system instability, and the latest work was scoped to no-mount debugging. No NeuraFS start command ran and no mount was attempted in this step.
+
+**Current verified state:** The installed NeuraFS `status` command reports VFS, API, Web, and watcher offline; boot persistence is disabled. The guard and its 11 passing no-mount tests remain installed/committed. Real native-dispatcher behavior after the guard is therefore still unverified.
