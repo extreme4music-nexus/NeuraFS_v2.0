@@ -277,3 +277,9 @@ Read-only comparison found the installed Python 3.12 site-packages driver calls 
 After the reported failure, subst showed no mapping; ~/.neurafs/run/vfs.pid contained 20496, but Get-Process found no process with that PID. API/Web logs are timestamped 2026-10-19 and contain no evidence for this start attempt. Windows denied process enumeration through tasklist/CIM. This supports that the installed VFS daemon exited, but does not establish the trigger of the Fortran close event.
 
 No new start/status/stop command was issued. No installation or source code was changed during this diagnosis.
+
+## Interrupted package synchronization (2026-10-20)
+
+A source synchronization was attempted after the user had authorized reinstalling the modified package. pip built a 2.0.0 wheel, began uninstalling installed neurafs 2.3.0, then failed with WinError 32 because Python312 Scripts\\neurafs.exe was in use. pip show now reports neurafs not installed, and the site-packages\\neurafs package directory is absent; the locked console launcher remains. Do not invoke neurafs until the package is restored.
+
+An elevated read-only process listing found python.exe PIDs 23548 and 20496. The vfs.pid file contains 20496; PID 20496 is a child of 23548. Command lines were unavailable. No process was terminated. Reinstallation must wait until the active start/driver process releases the launcher.
