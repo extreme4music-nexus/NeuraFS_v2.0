@@ -7,14 +7,16 @@ import subprocess
 import numpy as np
 import scipy.io.wavfile as wavfile
 from scipy.io.wavfile import WavFileWarning
-from typing import Tuple
+from typing import Optional, Tuple
 
 
 class AudioLoader:
     """Handles in-memory loading, format normalization, and PCM extraction."""
 
     @staticmethod
-    def load_from_bytes(file_bytes: bytes, target_sample_rate: int = 44100) -> Tuple[np.ndarray, int, int]:
+    def load_from_bytes(
+        file_bytes: bytes, target_sample_rate: Optional[int] = 44100
+    ) -> Tuple[np.ndarray, int, int]:
         """Loads audio file from RAM bytes (MP3/WAV/FLAC) into Float32 PCM numpy array via FFmpeg subprocess.
         
         Returns:
@@ -26,10 +28,16 @@ class AudioLoader:
             with warnings.catch_warnings():
                 warnings.simplefilter("ignore", WavFileWarning)
                 sr, pcm = wavfile.read(byte_io)
-            if pcm.dtype == np.int16:
-                pcm = (pcm / 32768.0).astype(np.float32)
-            elif pcm.dtype == np.int32:
-                pcm = (pcm / 2147483648.0).astype(np.float32)
+            if np.issubdtype(pcm.dtype, np.unsignedinteger):
+                info = np.iinfo(pcm.dtype)
+                midpoint = (float(info.max) + 1.0) / 2.0
+                pcm = ((pcm.astype(np.float32) - midpoint) / midpoint).astype(np.float32)
+            elif np.issubdtype(pcm.dtype, np.signedinteger):
+                info = np.iinfo(pcm.dtype)
+                scale = float(max(abs(info.min), info.max))
+                pcm = (pcm.astype(np.float32) / scale).astype(np.float32)
+            else:
+                pcm = pcm.astype(np.float32, copy=False)
             channels = 1 if pcm.ndim == 1 else pcm.shape[1]
             return pcm.T if pcm.ndim > 1 else pcm[np.newaxis, :], sr, channels
         except Exception:
@@ -37,14 +45,12 @@ class AudioLoader:
 
         # Fallback to FFmpeg pipe for encoded formats (MP3/AAC/FLAC)
         command = [
-            "ffmpeg",
-            "-i", "pipe:0",
-            "-f", "s16le",
-            "-acodec", "pcm_s16le",
-            "-ar", str(target_sample_rate),
-            "-ac", "2",
-            "pipe:1"
+            "ffmpeg", "-v", "error", "-i", "pipe:0", "-vn",
+            "-f", "wav", "-acodec", "pcm_f32le",
         ]
+        if target_sample_rate is not None:
+            command.extend(["-ar", str(int(target_sample_rate))])
+        command.append("pipe:1")
 
         # Prevent CMD window pop-ups on Windows
         kwargs = {}
@@ -58,19 +64,30 @@ class AudioLoader:
             stderr=subprocess.PIPE,
             **kwargs
         )
-        raw_pcm, _ = proc.communicate(input=file_bytes)
+        raw_pcm, error = proc.communicate(input=file_bytes)
         
         if proc.returncode != 0:
-            raise ValueError("Failed to decode audio bytes using FFmpeg pipeline.")
+            detail = error.decode("utf-8", errors="replace").strip()
+            raise ValueError(
+                "Failed to decode audio bytes using FFmpeg pipeline"
+                + (f": {detail}" if detail else ".")
+            )
 
-        audio_int16 = np.frombuffer(raw_pcm, dtype=np.int16)
-        audio_stereo = audio_int16.reshape(-1, 2).T
-        audio_float32 = (audio_stereo / 32768.0).astype(np.float32)
+        try:
+            with warnings.catch_warnings():
+                warnings.simplefilter("ignore", WavFileWarning)
+                sample_rate, pcm = wavfile.read(io.BytesIO(raw_pcm))
+        except Exception as exc:
+            raise ValueError("FFmpeg returned audio data NeuraFS could not read.") from exc
 
-        return audio_float32, target_sample_rate, 2
+        pcm = pcm.astype(np.float32, copy=False)
+        channels = 1 if pcm.ndim == 1 else pcm.shape[1]
+        return pcm.T if pcm.ndim > 1 else pcm[np.newaxis, :], sample_rate, channels
 
     @staticmethod
-    def load_from_file(file_path: str, target_sample_rate: int = 44100) -> Tuple[np.ndarray, int, int]:
+    def load_from_file(
+        file_path: str, target_sample_rate: Optional[int] = 44100
+    ) -> Tuple[np.ndarray, int, int]:
         """Reads local audio file into RAM bytes and extracts float32 PCM data."""
         with open(file_path, "rb") as f:
             file_bytes = f.read()

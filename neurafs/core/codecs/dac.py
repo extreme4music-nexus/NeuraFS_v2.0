@@ -10,7 +10,8 @@ from __future__ import annotations
 from typing import Any, Dict, List, Optional, Tuple
 
 import numpy as np
-
+from math import gcd
+from scipy.signal import resample_poly
 from neurafs.core.codecs.base import BaseNeuralCodec, CodecKind
 from neurafs.core.codecs.discrete import (
     ensure_channels_shape,
@@ -85,6 +86,8 @@ class DACCodec(BaseNeuralCodec):
         model = self._load_model()
         device = next(model.parameters()).device
         n_q = kwargs.get("n_quantizers", self.n_quantizers)
+        source_sample_rate = int(sample_rate)
+        model_sample_rate = int(model.sample_rate)
 
         # Encode per temporal chunk so VFS can seek without full-file decode
         chunks = TemporalChunker.slice_into_chunks(pcm_data, sample_rate=sample_rate)
@@ -101,7 +104,25 @@ class DACCodec(BaseNeuralCodec):
                 wav = torch.from_numpy(pcm_chunk).float().unsqueeze(1).to(device)
 
             with torch.no_grad():
-                x = model.preprocess(wav, sample_rate)
+                if source_sample_rate != model_sample_rate:
+                    divisor = gcd(source_sample_rate, model_sample_rate)
+                    original_device = wav.device
+                    original_dtype = wav.dtype
+
+                    resampled = resample_poly(
+                        wav.detach().cpu().numpy(),
+                        model_sample_rate // divisor,
+                        source_sample_rate // divisor,
+                        axis=-1,
+                    )
+
+                    wav = torch.as_tensor(
+                        resampled,
+                        device=original_device,
+                        dtype=original_dtype,
+                    )
+
+                x = model.preprocess(wav, model_sample_rate)
                 # encode returns z, codes, latents, commitment_loss, codebook_loss
                 _z, codes, *_rest = model.encode(x, n_quantizers=n_q)
                 # codes: [1, n_q, T] for mono or [C, n_q, T] for multi-channel
@@ -129,7 +150,7 @@ class DACCodec(BaseNeuralCodec):
             "precision": precision.value,
             "model_type": self.model_type,
             "n_quantizers": n_q,
-            "sample_rate": sample_rate,
+            "sample_rate": source_sample_rate,
             "channels": channels,
             "subbands": 1,
             "num_chunks": len(chunks),
@@ -151,6 +172,7 @@ class DACCodec(BaseNeuralCodec):
 
         model = self._load_model()
         device = next(model.parameters()).device
+        model_sample_rate = int(model.sample_rate)
         pcm_chunks: List[np.ndarray] = []
 
         # Ensure chronological order
@@ -170,6 +192,17 @@ class DACCodec(BaseNeuralCodec):
                 y = model.decode(z)
                 # y: [1, 1, T] for mono or [C, 1, T] for multi-channel
                 pcm_buf = y.squeeze(1).detach().cpu().numpy().astype(np.float32)
+
+                # DAC always emits at its model rate. Restore the source rate
+                # before enforcing the source chunk's sample count.
+                if model_sample_rate != int(sample_rate):
+                    divisor = gcd(model_sample_rate, int(sample_rate))
+                    pcm_buf = resample_poly(
+                        pcm_buf,
+                        int(sample_rate) // divisor,
+                        model_sample_rate // divisor,
+                        axis=-1,
+                    ).astype(np.float32, copy=False)
 
             target_len = int(unit.get("num_samples") or 0)
             if target_len > 0 and pcm_buf.shape[-1] != target_len:

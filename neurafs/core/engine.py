@@ -38,7 +38,11 @@ class NeuraFSEngine:
         codec_id = (codec or config.DEFAULT_CODEC).lower().strip()
         agent = get_codec(codec_id)
 
-        pcm_data, sample_rate, channels = AudioLoader.load_from_bytes(file_bytes)
+        # Keep the source rate and channel layout; codecs can resample internally
+        # to their model rate and restore it during decoding.
+        pcm_data, sample_rate, channels = AudioLoader.load_from_bytes(
+            file_bytes, target_sample_rate=None
+        )
 
         payload, chunk_units, neural_meta = agent.encode_media(
             pcm_data=pcm_data,
