@@ -212,3 +212,15 @@ No startup task was registered or modified. NeuraFS services were not stopped or
 **Other operating systems:** WSL Ubuntu is registered, but it cannot start: WSL reports that its `ext4.vhdx` disk path is missing (`ERROR_PATH_NOT_FOUND`). Therefore Linux runtime/install commands could not be executed. No macOS host or runner is available in this environment, so macOS remains untested. `setup.py` explicitly limits its custom PyInstaller install/uninstall flows to Windows and instructs other hosts to use `python -m pip install .`; actual Linux/macOS dependency installation and runtime behavior remain to be validated on working hosts.
 
 **Repository effects:** Only this validation record is added by this round. Temporary validation directory is retained for review and can be removed after approval; no cleanup was done automatically. Existing untracked `build/`, `dist/`, and `neurafs.egg-info/` entries predate this round and were left untouched.
+
+### WSL Linux installation and startup — status recorded 2026-10-19
+
+**Linux environment setup:** Ubuntu 26.04.1 under WSL2 was running as `tonic` with Python 3.14.4. The Z: drive was not automounted. Read-only CIFS access to `//192.168.50.23/NAS` was established at `/mnt/z`; the mounted checkout reported Git HEAD `24e9de7b`. No NAS credentials are stored in this log. WSL packages `python3-pip`, `python3.14-venv`, and `cifs-utils` were installed for testing.
+
+**Isolated Linux package install:** A copy of the package source and packaging metadata was made under `/tmp/neurafs-linux-validation-20261016`, outside the Z: checkout. A Python 3.14 virtual environment was created there. The official PyTorch CPU wheel `torch 2.14.1+cpu` was installed, then `pip install` of the copied NeuraFS source completed successfully, including its declared Python dependencies. The default PyPI PyTorch candidate also resolved CUDA toolkit packages; the CPU wheel was used to avoid installing GPU libraries in this CPU-only WSL test. No NeuraFS CLI start was run from this temporary validation environment.
+
+**User venv startup attempt:** The user then ran `start` from `~/neurafs-venv` with `HOME` preserved under `sudo`. Startup reached the VFS, API, Web, and watcher stages. It reported three failures: VFS did not become visible at `/home/tonic/NeuraFS_Drive` before the readiness timeout; FastAPI exited because `python-multipart` was missing; Node exited because `express` was missing. The watcher reported that it was already running. Startup correctly reported `vfs, api, web` as failures. The configured storage path shown was `/home/tonic/.neurafs/storage`.
+
+**Current status:** On 2026-10-18, the user reported “It's working now.” Record this as user-reported success; it has not been independently rechecked. No credentials or passwords are recorded. macOS remains untested.
+
+**Repository state:** At the time of this log update, `neurafs/core/codecs/dac.py` had an uncommitted change, along with pre-existing untracked build artifacts and `neurafs_uninstall.log`. These were left untouched; only this report entry is included in the commit.
