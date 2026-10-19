@@ -240,3 +240,13 @@ No startup task was registered or modified. NeuraFS services were not stopped or
 **Verification:** Added a deterministic regression test proving that two frame scales and frame boundaries survive codec encode/decode (`1 passed`). Real Windows 48 kHz EnCodec round trips passed for stereo and mono WAVs using cached model weights. The stereo source peak was 0.1800 and decoded peak 0.1917; the mono source peak was 0.1800 and decoded peak 0.2002. The mono result retained 24,000 samples at 48 kHz with one output channel. A real 24 kHz mono round trip passed with 6,000 samples and the expected `None` frame scales. Python compilation and `git diff --check` passed; only PyTorch's upstream `weight_norm` deprecation warning appeared in the real model test.
 
 **Scope:** Validation ran on Windows only, using temporary files and cached EnCodec weights. No WSL activity or user audio files were used.
+
+## Rollback: pre-VFS/RAM-streaming state
+Date: 2026-10-20
+
+The VFS/RAM-streaming work was reverted to the source state at 9c87c3102. Reverted commits: 852094078, d01be6fd1, d057439a8, and a4345d6c8. Git revert commits: 7769fa36b, 312964f2e, 02df840b4, and c4bb1148e.
+
+Reason: a Windows WinFSP mount attempt ended in a fatal CFFI invalid-handle error during GetFileInfo. The timing points to the VFS changes as a regression candidate, but the exact causal change was not isolated. No new mount was attempted during rollback.
+
+Verification: git diff 9c87c3102..HEAD is empty for tracked project contents. Untracked build/, dist/, neurafs.egg-info/, and neurafs_uninstall.log were left untouched. No tests were run.
+Correction: The rollback audit is the only tracked difference from 9c87c3102; functional source and configuration match that revision. 
