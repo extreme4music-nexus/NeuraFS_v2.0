@@ -8,7 +8,7 @@ from typing import Dict, Any
 
 CONFIG_DIR = Path.home() / ".neurafs"
 CONFIG_FILE = CONFIG_DIR / "config.json"
-DEFAULT_STORAGE = Path.home() / ".neurafs" / "storage"
+DEFAULT_STORAGE = Path(__file__).resolve().parents[2] / "storage"
 
 
 class StorageManager:

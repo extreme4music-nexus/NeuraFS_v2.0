@@ -1,85 +1,79 @@
-# NeuraFS installation and setup
+NeuraFS Complete Installation & Setup Guide
+This guide details the setup procedures for installing the NeuraFS core engine, Python SDK, Express Web Explorer, native OS virtual drivers (Linux FUSE / Windows WinFSP), and Samba network sharing.
 
-NeuraFS installs as a Python package. Its code and executables are installed into the active Python environment; storage and user settings live separately under the user's home directory.
+1. System Requirements
+Python: Python 3.8 or higher
 
-## Requirements
+Node.js: Node.js v16 or higher (for Web UI)
 
-- Python 3.8 or newer
-- Node.js 16 or newer with npm, for the Web Dashboard
-- FFmpeg, for audio conversion and non-WAV virtual audio formats
-- Windows: WinFSP, for the virtual drive
-- Linux: FUSE 3 and the `fusepy` Python binding, for the virtual mount
-- macOS: Python package installation is available; the native NeuraFS VFS driver is not implemented yet
+C Compiler: GCC / Clang (Linux/Samba) or MSVC (Windows build tools)
 
-DAC and EnCodec are provided as install extras. Install the `codecs` extra to enable both.
+Dependencies: PyTorch, NumPy, SciPy, FastAPI, Uvicorn, Multer, Express
 
-## Install from the project directory
+2. Python Package Setup (Core Engine & CLI)
+Clone the repository and navigate to the project root:
 
-Create and activate a virtual environment first if you want an isolated installation.
+Bash
+git clone https://github.com/your-org/NeuraFS.git
+cd NeuraFS
+Create and activate a virtual environment (recommended):
 
-```powershell
+Bash
 # Windows PowerShell
-python -m venv .venv
-.\.venv\Scripts\Activate.ps1
-python -m pip install ".[codecs]"
-```
+python -m venv venv
+.\venv\Scripts\Activate.ps1
 
-```bash
-# Linux or macOS
-python3 -m venv .venv
-source .venv/bin/activate
-python -m pip install '.[codecs]'
-```
+# Linux / macOS
+python3 -m venv venv
+source venv/bin/activate
+Install NeuraFS in editable mode:
 
-The Python package includes the CLI entry point and declares its runtime Python dependencies. `neurafs init` checks for platform tools, codecs, and the locked Node packages, and offers to install missing components.
+Bash
+pip install -e . --no-build-isolation
+Verify installation:
 
-## Install from a different working directory
-
-`setup.py` resolves the project root from its own location, so the legacy install form does not depend on the caller's current directory:
-
-```powershell
-python "Z:\path\to\NeuraFS\setup.py" install
-```
-
-The equivalent works on Linux and macOS with the appropriate project path. The recommended command remains `python -m pip install <project-path>[codecs]`.
-
-To uninstall from that same Python environment:
-
-```powershell
-python "Z:\path\to\NeuraFS\setup.py" uninstall
-```
-
-Uninstall removes the Python package and its CLI entry point. It preserves `~/.neurafs/config.json` and `~/.neurafs/storage`.
-
-## Initialize and start
-
-```text
+Bash
 neurafs --help
-neurafs init
-neurafs start
-neurafs status
-```
+3. Web Explorer UI Setup
+Install the Node.js dependencies declared for the NeuraFS package:
 
-Run `neurafs stop` to stop services and unmount the VFS. Do not start the WinFSP driver module directly; `neurafs start` manages its process and mount lifecycle.
+PowerShell
+npm install --prefix neurafs
 
-## Configuration and data locations
+The "neurafs start" command launches the Express Web Explorer with the other NeuraFS services. Open http://localhost:3000 in your web browser.
 
-- User configuration: `~/.neurafs/config.json`
-- Default storage: `~/.neurafs/storage`
-- Runtime state and PID files: `~/.neurafs/run`
+4. Native OS Drivers Setup
+Linux FUSE Mounting
+Ensure fuse3 libraries are installed:
 
-An existing configured `storage_path` is retained by package upgrades and reinstallations. The defaults do not depend on the source checkout or Python installation directory.
+Bash
+sudo apt-get install libfuse3-dev fuse3
+python -m neurafs.drivers.linux_fuse /path/to/storage /mnt/neurafs
+Windows WinFSP Mounting
+Download and install WinFSP.
 
-## Manual Web dependency provisioning
+Run the WinFSP driver launcher:
 
-If `neurafs init` cannot install Node dependencies automatically, run `npm ci` in the installed NeuraFS package directory. The package directory can be printed with:
+PowerShell
+python -m neurafs.drivers.windows_winfsp C:\Users\tonic\Documents\NeuraFS\storage Z:
+5. Samba VFS Network Sharing
+To expose .hcs containers as uncompressed .wav files across a local network share:
 
-```powershell
-python -c "import pathlib, neurafs; print(pathlib.Path(neurafs.__file__).parent)"
-```
+Compile the C VFS module (neurafs_samba_vfs.c):
 
-Then use the printed path as the `--prefix` value:
+Bash
+gcc -shared -fPIC -O2 neurafs/drivers/samba_vfs.c -o /usr/lib/x86_64-linux-gnu/samba/vfs/neurafs.so
+Add the following share block to /etc/samba/smb.conf:
 
-```powershell
-npm ci --prefix "<printed-package-directory>"
-```
+Ini, TOML
+[NeuraFS-Share]
+   comment = NeuraFS Virtual Neural Media Network Share
+   path = /var/neurafs/storage
+   vfs objects = neurafs
+   read only = yes
+   guest ok = yes
+   browseable = yes
+Restart Samba service:
+
+Bash
+sudo systemctl restart smbd

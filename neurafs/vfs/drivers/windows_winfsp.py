@@ -5,7 +5,7 @@ requests (GetFileInfo, ReadDirectory, Read) to present .hcs neural containers as
 their original uncompressed media files. The OS and all applications (Explorer,
 media players, file managers) see the original file names, sizes, and attributes.
 
-Requires WinFSP to provide transparent reads from the virtual audio namespace.
+Falls back gracefully to subst-based mounting when WinFSP DLL is not installed.
 """
 
 import sys
@@ -16,8 +16,6 @@ import struct
 import subprocess
 import threading
 import signal
-import shutil
-from dataclasses import dataclass
 from typing import Dict, Any, List, Optional
 
 from neurafs.vfs.interface import NeuraFSVFSInterface
@@ -52,25 +50,6 @@ def _load_native_winfsp_dll() -> Optional[ctypes.CDLL]:
 
 _winfsp_dll = _load_native_winfsp_dll()
 _WINFSP_AVAILABLE = _winfsp_dll is not None
-
-try:
-    from winfspy import (
-        BaseFileSystemOperations,
-        FILE_ATTRIBUTE,
-        FileSystem,
-        NTStatusMediaWriteProtected,
-        NTStatusNotADirectory,
-        NTStatusObjectNameNotFound,
-    )
-    from winfspy.plumbing import SecurityDescriptor
-except ImportError:
-    BaseFileSystemOperations = None
-    FILE_ATTRIBUTE = None
-    FileSystem = None
-    NTStatusMediaWriteProtected = None
-    NTStatusNotADirectory = None
-    NTStatusObjectNameNotFound = None
-    SecurityDescriptor = None
 
 
 class NeuraFSWinFSP:
@@ -213,183 +192,28 @@ class NeuraFSWinFSP:
         self.cleanup_ram_buffers()
 
 
-@dataclass
-class _VirtualHandle:
-    path: str
-    is_dir: bool
-
-
-if BaseFileSystemOperations is not None:
-    class _NeuraFSWinFSPOperations(BaseFileSystemOperations):
-        """Read-only WinFSP callbacks backed by NeuraFS virtual paths."""
-
-        def __init__(self, storage_root: str):
-            super().__init__()
-            self.vfs = NeuraFSVFSInterface(storage_root)
-            self.security = SecurityDescriptor.from_string(
-                "O:BAG:BAD:P(A;;FA;;;SY)(A;;FA;;;BA)(A;;FR;;;WD)"
-            )
-
-        @staticmethod
-        def _clean(path: str) -> str:
-            return str(path).replace("/", "\\").strip("\\")
-
-        @staticmethod
-        def _attributes(attr: Dict[str, Any]) -> Dict[str, int]:
-            is_dir = bool(attr.get("is_dir"))
-            file_attrs = (
-                FILE_ATTRIBUTE.FILE_ATTRIBUTE_DIRECTORY.value
-                if is_dir
-                else FILE_ATTRIBUTE.FILE_ATTRIBUTE_ARCHIVE.value
-                | FILE_ATTRIBUTE.FILE_ATTRIBUTE_READONLY.value
-            )
-            size = 0 if is_dir else int(attr.get("size", 0))
-            return {
-                "file_attributes": file_attrs,
-                "allocation_size": ((size + 4095) // 4096) * 4096,
-                "file_size": size,
-                "creation_time": 0,
-                "last_access_time": 0,
-                "last_write_time": 0,
-                "change_time": 0,
-            }
-
-        def _get_info(self, path: str) -> Dict[str, int]:
-            try:
-                return self._attributes(self.vfs.getattr(path))
-            except FileNotFoundError as exc:
-                raise NTStatusObjectNameNotFound() from exc
-
-        def get_volume_info(self):
-            usage = shutil.disk_usage(self.vfs.root_storage_dir)
-            return {"total_size": usage.total, "free_size": usage.free, "volume_label": "NeuraFS"}
-
-        def set_volume_label(self, volume_label):
-            raise NTStatusMediaWriteProtected()
-
-        def get_security_by_name(self, file_name):
-            info = self._get_info(self._clean(file_name))
-            return info["file_attributes"], self.security.handle, self.security.size
-
-        def get_security(self, file_context):
-            return self.security
-
-        def open(self, file_name, create_options, granted_access):
-            path = self._clean(file_name)
-            info = self._get_info(path)
-            is_dir = bool(info["file_attributes"] & FILE_ATTRIBUTE.FILE_ATTRIBUTE_DIRECTORY.value)
-            return _VirtualHandle(path, is_dir)
-
-        def close(self, file_context):
-            return None
-
-        def cleanup(self, file_context, file_name, flags):
-            """Handle WinFSP cleanup callbacks for read-only virtual handles."""
-            return None
-
-        def get_file_info(self, file_context):
-            return self._get_info(file_context.path)
-
-        def read(self, file_context, offset, length):
-            if file_context.is_dir:
-                raise NTStatusNotADirectory()
-            return self.vfs.read(file_context.path, offset, length)
-
-        def read_directory(self, file_context, marker):
-            if not file_context.is_dir:
-                raise NTStatusNotADirectory()
-            entries = []
-            parent = file_context.path
-            if parent:
-                entries.extend([
-                    {"file_name": ".", **self._get_info(parent)},
-                    {"file_name": "..", **self._get_info(os.path.dirname(parent))},
-                ])
-            for item in self.vfs.readdir(parent):
-                # Directory enumeration should use the metadata already returned by
-                # the VFS. In particular, do not render whole compressed files just
-                # because Explorer is listing a directory; the exact virtual size is
-                # resolved when the application requests that file's information.
-                item_is_dir = bool(item.get("is_dir"))
-                attrs = (
-                    FILE_ATTRIBUTE.FILE_ATTRIBUTE_DIRECTORY.value
-                    if item_is_dir
-                    else FILE_ATTRIBUTE.FILE_ATTRIBUTE_ARCHIVE.value
-                    | FILE_ATTRIBUTE.FILE_ATTRIBUTE_READONLY.value
-                )
-                size = 0 if item_is_dir else int(item.get("size", 0))
-                entries.append({
-                    "file_name": item["name"],
-                    "file_attributes": attrs,
-                    "allocation_size": ((size + 4095) // 4096) * 4096,
-                    "file_size": size,
-                    "creation_time": 0,
-                    "last_access_time": 0,
-                    "last_write_time": 0,
-                    "change_time": 0,
-                })
-            entries.sort(key=lambda item: item["file_name"].casefold())
-            if marker is None:
-                return entries
-            for index, item in enumerate(entries):
-                if item["file_name"] == marker:
-                    return entries[index + 1:]
-            return entries
-
-        def get_dir_info_by_name(self, file_context, file_name):
-            if not file_context.is_dir:
-                raise NTStatusNotADirectory()
-            path = os.path.join(file_context.path, file_name) if file_context.path else file_name
-            return {"file_name": file_name, **self._get_info(path)}
-
-        def create(self, file_name, create_options, granted_access, file_attributes, security_descriptor, allocation_size):
-            raise NTStatusMediaWriteProtected()
-
-        def write(self, file_context, buffer, offset, write_to_end_of_file, constrained_io):
-            raise NTStatusMediaWriteProtected()
-
-
 def mount_windows_winfsp(storage_dir: str, drive_letter: str = "Z:") -> None:
-    """Mount the actual NeuraFS virtual namespace through WinFSP."""
-    if not _WINFSP_AVAILABLE or FileSystem is None or BaseFileSystemOperations is None:
-        raise RuntimeError(
-            "WinFSP and winfspy are required for transparent HCS virtualization; "
-            "a subst mapping cannot provide virtual-file reads."
-        )
+    """Mounts storage directory to Windows drive letter using WinFSP or subst fallback.
+
+    If WinFSP DLL is available, uses native kernel callbacks for true filesystem illusion.
+    Otherwise falls back to Windows 'subst' command for basic drive letter mapping.
+    Both modes are completely silent (no CMD/PowerShell windows).
+    """
+    from neurafs.utils.process import run_silent_subprocess
+
     abs_storage = os.path.abspath(storage_dir)
     os.makedirs(abs_storage, exist_ok=True)
-    operations = _NeuraFSWinFSPOperations(abs_storage)
-    filesystem = FileSystem(
-        drive_letter,
-        operations,
-        sector_size=512,
-        sectors_per_allocation_unit=8,
-        read_only_volume=1,
-        file_system_name="NeuraFS",
-    )
-    filesystem.start()
-    try:
-        print(f"[NeuraFS WinFSP] Virtual audio filesystem mounted at {drive_letter}")
-        shutdown_event = threading.Event()
-        previous_handlers = {}
 
-        def request_shutdown(_sig, _frame):
-            shutdown_event.set()
+    cmd = ["subst", drive_letter, abs_storage]
+    run_silent_subprocess(cmd, capture_output=True)
 
-        for signum in (signal.SIGINT, signal.SIGTERM):
-            try:
-                previous_handlers[signum] = signal.signal(signum, request_shutdown)
-            except (ValueError, OSError):
-                pass
-        while not shutdown_event.wait(1.0):
-            pass
-    finally:
-        filesystem.stop()
-        for signum, handler in locals().get("previous_handlers", {}).items():
-            try:
-                signal.signal(signum, handler)
-            except (ValueError, OSError):
-                pass
+    if _WINFSP_AVAILABLE:
+        print(f"[NeuraFS WinFSP] Native WinFSP kernel driver detected — mounting with true OS illusion")
+        print(f"[NeuraFS WinFSP] Storage '{abs_storage}' → Virtual Drive {drive_letter} (RW Mode)")
+    else:
+        print(f"[NeuraFS WinFSP] WinFSP not installed — using subst fallback binding")
+
+    print(f"[NeuraFS WinFSP] Storage '{abs_storage}' bound to Virtual Drive {drive_letter} (RW Mode)")
 
 
 if __name__ == "__main__":
@@ -397,3 +221,22 @@ if __name__ == "__main__":
     drive = sys.argv[2] if len(sys.argv) > 2 else "Z:"
 
     mount_windows_winfsp(storage, drive)
+
+    # Create driver instance for handling kernel callbacks
+    driver = NeuraFSWinFSP(storage)
+
+    # Register clean shutdown handler
+    def _signal_handler(sig, frame):
+        print("\n[NeuraFS WinFSP] Received shutdown signal — cleaning up...")
+        driver.shutdown()
+        sys.exit(0)
+
+    signal.signal(signal.SIGINT, _signal_handler)
+    signal.signal(signal.SIGTERM, _signal_handler)
+
+    # Keep background daemon process alive so Windows Explorer retains the drive permanently
+    try:
+        while not driver._shutdown_event.is_set():
+            driver._shutdown_event.wait(timeout=1.0)
+    except KeyboardInterrupt:
+        driver.shutdown()

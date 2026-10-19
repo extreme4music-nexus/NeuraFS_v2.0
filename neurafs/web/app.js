@@ -32,7 +32,7 @@ function getUniversalStorageRoot() {
             console.warn('[NeuraFS Web] Се користи стандардна патека за storage.');
         }
     }
-    return path.join(os.homedir(), '.neurafs', 'storage');
+    return path.resolve(path.join(__dirname, '..', '..', 'storage'));
 }
 
 const STORAGE_ROOT = getUniversalStorageRoot();

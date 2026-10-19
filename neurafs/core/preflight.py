@@ -7,7 +7,6 @@ import shutil
 import subprocess
 import sys
 import ctypes
-from pathlib import Path
 from dataclasses import dataclass, field, asdict
 from typing import Any, Dict, List, Optional
 
@@ -35,15 +34,13 @@ class PreFlightChecker:
     """Scans OS drivers, core Python packages, codecs, and system tools."""
 
     CORE_PIP = [
-        ("torch", "torch", "PyTorch", "required"),
-        ("numpy", "numpy", "NumPy", "required"),
-        ("scipy", "scipy", "SciPy", "required"),
-        ("fastapi", "fastapi", "FastAPI", "required"),
-        ("uvicorn", "uvicorn", "Uvicorn", "required"),
-        ("pydantic", "pydantic", "Pydantic", "required"),
-        ("psutil", "psutil", "psutil", "required"),
-        ("multipart", "python-multipart", "python-multipart", "required"),
-        ("watchdog", "watchdog", "watchdog", "required"),
+        ("torch", "PyTorch", "required"),
+        ("numpy", "NumPy", "required"),
+        ("scipy", "SciPy", "required"),
+        ("fastapi", "FastAPI", "required"),
+        ("uvicorn", "Uvicorn", "required"),
+        ("pydantic", "Pydantic", "required"),
+        ("psutil", "psutil", "required"),
     ]
 
     @classmethod
@@ -228,35 +225,9 @@ class PreFlightChecker:
         )
 
     @classmethod
-    def check_node_packages(cls) -> DependencyItem:
-        """Check the locked Node packages required by the web service."""
-        package_root = Path(__file__).resolve().parents[1]
-        required = ("express", "multer", "lzma-native")
-        missing = [
-            name for name in required
-            if not (package_root / "node_modules" / name / "package.json").is_file()
-        ]
-        npm_available = cls._tool_available("npm")
-        installed = not missing
-        command = ["npm", "ci", "--prefix", str(package_root)] if npm_available else []
-        return DependencyItem(
-            id="node:packages",
-            name="NeuraFS Web dependencies (Express, Multer, LZMA)",
-            category="optional",
-            installed=installed,
-            detail="all locked packages available" if installed else "Missing: " + ", ".join(missing),
-            manual_guide=(
-                f'npm ci --prefix "{package_root}"'
-                if npm_available
-                else "Install Node.js LTS (which includes npm), then run npm ci in the NeuraFS package directory."
-            ),
-            auto_cmd=command,
-        )
-
-    @classmethod
     def check_core_python_packages(cls) -> List[DependencyItem]:
         items: List[DependencyItem] = []
-        for mod, package, name, category in cls.CORE_PIP:
+        for mod, name, category in cls.CORE_PIP:
             ok = cls._module_available(mod)
             items.append(
                 DependencyItem(
@@ -265,8 +236,8 @@ class PreFlightChecker:
                     category=category,
                     installed=ok,
                     detail=f"import {mod}" if ok else f"Missing Python package '{mod}'",
-                    manual_guide=f"pip install {package}",
-                    pip_packages=[package],
+                    manual_guide=f"pip install {mod}",
+                    pip_packages=[mod],
                 )
             )
         # Platform VFS python binding
@@ -357,7 +328,6 @@ class PreFlightChecker:
         items.extend(cls.check_core_python_packages())
         items.append(cls.check_ffmpeg())
         items.append(cls.check_node())
-        items.append(cls.check_node_packages())
         items.append(cls.check_samba(os_type))
 
         if os_type == "windows":
