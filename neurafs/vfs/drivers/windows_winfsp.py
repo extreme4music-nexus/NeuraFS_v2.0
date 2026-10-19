@@ -12,7 +12,6 @@ import sys
 import os
 import time
 import ctypes
-import logging
 import struct
 import subprocess
 import threading
@@ -63,7 +62,7 @@ try:
         NTStatusNotADirectory,
         NTStatusObjectNameNotFound,
     )
-    from winfspy.plumbing import NTSTATUS, SecurityDescriptor
+    from winfspy.plumbing import SecurityDescriptor
 except ImportError:
     BaseFileSystemOperations = None
     FILE_ATTRIBUTE = None
@@ -72,7 +71,6 @@ except ImportError:
     NTStatusNotADirectory = None
     NTStatusObjectNameNotFound = None
     SecurityDescriptor = None
-    NTSTATUS = None
 
 
 class NeuraFSWinFSP:
@@ -291,24 +289,6 @@ if BaseFileSystemOperations is not None:
 
         def get_file_info(self, file_context):
             return self._get_info(file_context.path)
-
-        def ll_get_file_info(self, file_context, file_info):
-            """Reject unknown native contexts before WinFSPy's fatal CFFI lookup."""
-            try:
-                is_open_context = file_context in self._opened_objs
-            except BaseException:
-                is_open_context = False
-
-            if not is_open_context:
-                logging.getLogger(__name__).critical(
-                    "WinFSP GetFileInfo received an unregistered file context: %r; "
-                    "known open contexts: %d",
-                    file_context,
-                    len(self._opened_objs),
-                )
-                return NTSTATUS.STATUS_INVALID_HANDLE
-
-            return super().ll_get_file_info(file_context, file_info)
 
         def read(self, file_context, offset, length):
             if file_context.is_dir:
