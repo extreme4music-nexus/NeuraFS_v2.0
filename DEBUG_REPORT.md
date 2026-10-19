@@ -263,3 +263,7 @@ Limits: no real WinFSP mount or Explorer file access was attempted due the previ
 ## Status interpretation clarification (2026-10-20)
 
 The user clarified that neurafs stop was run before the most recent PC restart. Therefore the subsequent offline status is expected and must not be counted as evidence of service failure. This explains the observed stopped state but does not verify service startup or a real WinFSP mount.
+
+## Current start attempt: user reports VFS hang (2026-10-20)
+
+The user reports that neurafs start is currently stuck at VFS. No second start, status, stop, or mount command was issued by the agent. The logs under C:\Users\tonic\.neurafs\logs were last modified on 2026-10-19 and do not capture this attempt. Process enumeration was blocked: tasklist returned a credentials error and Get-CimInstance returned access denied; this is not evidence that no NeuraFS process is running. Root cause is not yet established. Next diagnostic input needed: the exact last console lines and elapsed time, or a current VFS-specific log.
