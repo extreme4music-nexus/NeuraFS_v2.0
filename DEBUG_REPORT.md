@@ -259,3 +259,7 @@ Checks: neurafs --help exited 0; neurafs list-codecs exited 0 and reported SIREN
 Tests: python -m pytest -p no:cacheprovider --basetemp isolated-temp -q neurafs\tests — 28 passed, 4 upstream PyTorch weight_norm deprecation warnings, 160.45 seconds. VFS mount tests mock mount operations; the interface illusion test uses temporary files. A first collection attempt failed because the temporary profile variable was expanded incorrectly; after setting explicit temporary paths, the suite passed.
 
 Limits: no real WinFSP mount or Explorer file access was attempted due the previously reported fatal CFFI invalid-handle crash. Therefore Windows kernel-level VFS behavior is not confirmed. No application services were started. The source was not modified by tests.
+
+## Status interpretation clarification (2026-10-20)
+
+The user clarified that neurafs stop was run before the most recent PC restart. Therefore the subsequent offline status is expected and must not be counted as evidence of service failure. This explains the observed stopped state but does not verify service startup or a real WinFSP mount.
