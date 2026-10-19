@@ -248,5 +248,14 @@ The VFS/RAM-streaming work was reverted to the source state at 9c87c3102. Revert
 
 Reason: a Windows WinFSP mount attempt ended in a fatal CFFI invalid-handle error during GetFileInfo. The timing points to the VFS changes as a regression candidate, but the exact causal change was not isolated. No new mount was attempted during rollback.
 
-Verification: git diff 9c87c3102..HEAD is empty for tracked project contents. Untracked build/, dist/, neurafs.egg-info/, and neurafs_uninstall.log were left untouched. No tests were run.
-Correction: The rollback audit is the only tracked difference from 9c87c3102; functional source and configuration match that revision. 
+Verification at rollback time: tracked source and configuration files matched 9c87c3102; DEBUG_REPORT.md preserved the audit trail. Untracked build/, dist/, neurafs.egg-info/, and neurafs_uninstall.log were left untouched. No tests had been run at rollback time.
+
+## Baseline functional verification (2026-10-20)
+
+Environment: Windows 11 host, Python 3.12.4, installed NeuraFS 2.3.0; the test process imported project source from Z:\Documents\NeuraFS. Tests ran with an isolated USERPROFILE, APPDATA, and LOCALAPPDATA under the system Temp directory.
+
+Checks: neurafs --help exited 0; neurafs list-codecs exited 0 and reported SIREN, DAC, EnCodec, and FutureNeuralCodec_v1 available. neurafs status reported VFS, API, Web, and Watcher offline.
+
+Tests: python -m pytest -p no:cacheprovider --basetemp isolated-temp -q neurafs\tests — 28 passed, 4 upstream PyTorch weight_norm deprecation warnings, 160.45 seconds. VFS mount tests mock mount operations; the interface illusion test uses temporary files. A first collection attempt failed because the temporary profile variable was expanded incorrectly; after setting explicit temporary paths, the suite passed.
+
+Limits: no real WinFSP mount or Explorer file access was attempted due the previously reported fatal CFFI invalid-handle crash. Therefore Windows kernel-level VFS behavior is not confirmed. No application services were started. The source was not modified by tests.
