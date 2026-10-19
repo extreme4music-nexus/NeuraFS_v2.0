@@ -111,6 +111,7 @@ class EnCodecCodec(BaseNeuralCodec):
 
         bandwidth = float(kwargs.get("bandwidth", self.bandwidth))
         model = self._load_model(sample_rate)
+        model_sample_rate = int(getattr(model, "sample_rate", sample_rate))
         if hasattr(model, "set_target_bandwidth"):
             model.set_target_bandwidth(bandwidth)
         device = next(model.parameters()).device
@@ -126,6 +127,9 @@ class EnCodecCodec(BaseNeuralCodec):
                 wav = torch.from_numpy(pcm).unsqueeze(0).unsqueeze(0)
             else:
                 wav = torch.from_numpy(pcm).unsqueeze(0)  # [1, C, T]
+            if model_sample_rate >= 48000 and wav.shape[1] == 1:
+                # The official 48 kHz EnCodec model is stereo-only.
+                wav = wav.expand(-1, 2, -1).contiguous()
             wav = wav.to(device)
 
             with torch.no_grad():
@@ -133,11 +137,24 @@ class EnCodecCodec(BaseNeuralCodec):
                 encoded = model.encode(wav)
                 # Flatten frame codes: each codes is [n_q, T] or [B, n_q, T]
                 frame_codes = []
+                frame_scales = []
+                frame_lengths = []
                 for frame in encoded:
                     codes = frame[0] if isinstance(frame, (tuple, list)) else frame
+                    scale = frame[1] if isinstance(frame, (tuple, list)) and len(frame) > 1 else None
                     if codes.dim() == 3:
                         codes = codes[0]
-                    frame_codes.append(codes.detach().cpu().numpy().astype(np.int16))
+                    codes_np = codes.detach().cpu().numpy().astype(np.int16)
+                    frame_codes.append(codes_np)
+                    frame_lengths.append(int(codes_np.shape[-1]))
+                    if scale is None:
+                        frame_scales.append(None)
+                    elif torch.is_tensor(scale):
+                        frame_scales.append(scale.detach().cpu().tolist())
+                    elif isinstance(scale, np.ndarray):
+                        frame_scales.append(scale.tolist())
+                    else:
+                        frame_scales.append(float(scale))
                 # Concatenate along time for single chunk blob
                 codes_np = np.concatenate(frame_codes, axis=-1) if frame_codes else np.zeros((1, 0), np.int16)
 
@@ -150,6 +167,8 @@ class EnCodecCodec(BaseNeuralCodec):
                     "offset": blob_offset,
                     "length": blob_len,
                     "num_samples": int(pcm.shape[-1]),
+                    "frame_lengths": frame_lengths,
+                    "frame_scales": frame_scales,
                 }
             )
             concatenated.extend(blob)
@@ -163,6 +182,7 @@ class EnCodecCodec(BaseNeuralCodec):
             "bandwidth": bandwidth,
             "backend": self._backend,
             "sample_rate": sample_rate,
+            "model_sample_rate": model_sample_rate,
             "channels": channels,
             "subbands": 1,
             "num_chunks": len(chunks),
@@ -195,13 +215,48 @@ class EnCodecCodec(BaseNeuralCodec):
 
         for unit, blob in ordered:
             codes_np = unpack_codes(blob)
-            codes = torch.from_numpy(codes_np.astype(np.int64)).unsqueeze(0).to(device)
-            # EncodedFrame format: list[(codes, scale)]
-            encoded_frames = [(codes, None)]
+            frame_lengths = unit.get("frame_lengths")
+            frame_scales = unit.get("frame_scales")
+            if frame_lengths is None:
+                # Read legacy containers that stored one concatenated frame
+                # without EnCodec normalization scales.
+                codes = torch.from_numpy(codes_np.astype(np.int64)).unsqueeze(0).to(device)
+                encoded_frames = [(codes, None)]
+            else:
+                if frame_scales is None or len(frame_lengths) != len(frame_scales):
+                    raise NeuralResynthesisError(
+                        "EnCodec container has incomplete frame scale metadata."
+                    )
+                encoded_frames = []
+                code_offset = 0
+                for frame_length, scale_value in zip(frame_lengths, frame_scales):
+                    frame_length = int(frame_length)
+                    if frame_length < 0 or code_offset + frame_length > codes_np.shape[-1]:
+                        raise NeuralResynthesisError(
+                            "EnCodec container has invalid frame-length metadata."
+                        )
+                    frame_codes = codes_np[..., code_offset:code_offset + frame_length]
+                    codes = torch.from_numpy(frame_codes.astype(np.int64)).unsqueeze(0).to(device)
+                    scale = (
+                        None
+                        if scale_value is None
+                        else torch.as_tensor(scale_value, dtype=torch.float32, device=device)
+                    )
+                    encoded_frames.append((codes, scale))
+                    code_offset += frame_length
+                if code_offset != codes_np.shape[-1]:
+                    raise NeuralResynthesisError(
+                        "EnCodec container frame lengths do not match its code payload."
+                    )
             with torch.no_grad():
                 wav = model.decode(encoded_frames)
                 # wav: [B, C, T]
                 pcm = wav[0].detach().cpu().numpy().astype(np.float32)
+                model_sample_rate = int(
+                    neural_info.get("model_sample_rate", neural_info.get("sample_rate", sample_rate))
+                )
+                if channels == 1 and model_sample_rate >= 48000 and pcm.shape[0] > 1:
+                    pcm = pcm.mean(axis=0, keepdims=True)
 
             target_len = int(unit.get("num_samples") or 0)
             if target_len > 0 and pcm.shape[-1] != target_len:
