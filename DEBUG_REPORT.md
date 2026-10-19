@@ -267,3 +267,13 @@ The user clarified that neurafs stop was run before the most recent PC restart. 
 ## Current start attempt: user reports VFS hang (2026-10-20)
 
 The user reports that neurafs start is currently stuck at VFS. No second start, status, stop, or mount command was issued by the agent. The logs under C:\Users\tonic\.neurafs\logs were last modified on 2026-10-19 and do not capture this attempt. Process enumeration was blocked: tasklist returned a credentials error and Get-CimInstance returned access denied; this is not evidence that no NeuraFS process is running. Root cause is not yet established. Next diagnostic input needed: the exact last console lines and elapsed time, or a current VFS-specific log.
+
+## Installed/source VFS mismatch and start abort (2026-10-20)
+
+User-provided output: neurafs start selected X: and then emitted Intel Fortran runtime error 200, program aborting due to window-CLOSE event. This is distinct from the earlier CFFI ffi.from_handle fatal error.
+
+Read-only comparison found the installed Python 3.12 site-packages driver calls WinFSP FileSystem.start() and its service manager spawns a detached silent daemon, recording its PID in ~/.neurafs/run/vfs.pid. The rolled-back Z: source driver instead calls subst and does not call WinFSP FileSystem.start(). Therefore the neurafs command currently runs code that is not synchronized with the rolled-back repository.
+
+After the reported failure, subst showed no mapping; ~/.neurafs/run/vfs.pid contained 20496, but Get-Process found no process with that PID. API/Web logs are timestamped 2026-10-19 and contain no evidence for this start attempt. Windows denied process enumeration through tasklist/CIM. This supports that the installed VFS daemon exited, but does not establish the trigger of the Fortran close event.
+
+No new start/status/stop command was issued. No installation or source code was changed during this diagnosis.
