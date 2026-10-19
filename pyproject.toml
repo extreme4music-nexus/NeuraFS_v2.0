@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "neurafs"
-version = "2.0.0"
+version = "2.3.0"
 description = "Virtual Neural Media File System Core Engine"
 requires-python = ">=3.8"
 dependencies = [
@@ -15,6 +15,8 @@ dependencies = [
     "uvicorn",
     "pydantic",
     "psutil",
+    "python-multipart",
+    "watchdog",
     "winfspy; sys_platform == 'win32'",
 ]
 

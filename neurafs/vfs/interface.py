@@ -1,7 +1,7 @@
 """NeuraFS Standardized Virtual File System Interface."""
 
 import os
-from typing import Dict, Any, List
+from typing import Dict, Any, List, Union
 
 from neurafs.vfs.virtual_layer import VFSVirtualLayer
 from neurafs.vfs.ram_streamer import RAMStreamBuffer, DataStreamBuffer
@@ -15,19 +15,42 @@ class NeuraFSVFSInterface:
 
     def __init__(self, root_storage_dir: str):
         self.root_storage_dir = os.path.abspath(root_storage_dir)
-        self.active_buffers: Dict[str, RAMStreamBuffer] = {}
+        self.active_buffers: Dict[str, Union[RAMStreamBuffer, DataStreamBuffer]] = {}
+
+    def _get_streamer(self, physical_hcs_path: str):
+        if physical_hcs_path not in self.active_buffers:
+            with open(physical_hcs_path, "rb") as f:
+                hcs_bytes = f.read()
+            try:
+                self.active_buffers[physical_hcs_path] = RAMStreamBuffer(hcs_bytes)
+            except Exception:
+                self.active_buffers[physical_hcs_path] = DataStreamBuffer(hcs_bytes)
+        return self.active_buffers[physical_hcs_path]
 
     def getattr(self, virtual_path: str) -> Dict[str, Any]:
         """Returns spoofed virtual file attributes for kernel filesystem requests."""
         attr = VFSVirtualLayer.get_virtual_attributes(self.root_storage_dir, virtual_path)
         if not attr:
             raise FileNotFoundError(f"Virtual path missing: {virtual_path}")
+        if attr.get("type") == "HCS_VIRTUAL":
+            streamer = self._get_streamer(attr["physical_path"])
+            if isinstance(streamer, RAMStreamBuffer):
+                attr["size"] = streamer.virtual_file_size
         return attr
 
     def readdir(self, virtual_dir_path: str) -> List[Dict[str, Any]]:
         """Lists virtualized uncompressed files inside target directory."""
         target_dir = os.path.join(self.root_storage_dir, virtual_dir_path.lstrip("/\\"))
-        return VFSVirtualLayer.resolve_virtual_listing(target_dir)
+        items = VFSVirtualLayer.resolve_virtual_listing(target_dir)
+        for item in items:
+            if item.get("type") == "HCS_VIRTUAL" and os.path.splitext(item["name"])[1].lower() in (".wav", ".wave"):
+                try:
+                    item["size"] = self.getattr(
+                        os.path.relpath(item["physical_path"][:-4], self.root_storage_dir)
+                    )["size"]
+                except (FileNotFoundError, OSError, ValueError):
+                    pass
+        return items
 
     def read(self, virtual_path: str, offset: int, length: int) -> bytes:
         """Handles byte-offset read requests directly from RAM stream buffers or raw files."""
@@ -37,19 +60,9 @@ class NeuraFSVFSInterface:
 
         # Scenario A: File is COMPLETED_HCS (.hcs container)
         if os.path.exists(phys_hcs):
-            if phys_hcs not in self.active_buffers:
-                with open(phys_hcs, "rb") as f:
-                    hcs_bytes = f.read()
-                
-                # Автоматска детекција: Невронско аудио или LZMA Податоци
-                try:
-                    self.active_buffers[phys_hcs] = RAMStreamBuffer(hcs_bytes)
-                except Exception:
-                    self.active_buffers[phys_hcs] = DataStreamBuffer(hcs_bytes)
-
-            streamer = self.active_buffers[phys_hcs]
+            streamer = self._get_streamer(phys_hcs)
             if isinstance(streamer, RAMStreamBuffer):
-                return streamer.read_pcm_bytes(offset, length)
+                return streamer.read_file_bytes(offset, length)
             else:
                 return streamer.read_bytes(offset, length)
 
